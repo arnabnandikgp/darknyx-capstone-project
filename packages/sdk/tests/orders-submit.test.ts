@@ -1,24 +1,22 @@
 /**
- * Phase 3 — order submission test suite (§23.3.3).
+ * Privacy-fix submit_order — TS unit suite.
  *
- * Covers the TS-side half of the 12-test matrix:
- *   1.  test_attestation_failure_aborts
- *   2.  test_invalid_jwt_rejected_by_tee
- *   4.  test_order_for_locked_note_rejected
- *   5.  test_order_for_consumed_note_rejected
- *   7.  test_lock_note_called_on_acceptance          (SDK wiring half)
- *   8.  test_jwt_refresh_on_401
- *   9.  test_order_inclusion_commitment_returned
- *  12.  test_order_submit_staged_errors
+ * Verifies that:
+ *   1. attestation failure aborts before any network IO
+ *   2. JWT refresh on 401 retries the send exactly once
+ *   3. parameter validation rejects malformed inputs
+ *   4. happy path returns the PendingOrder PDA we wrote to
+ *   5. each pipeline stage throws DarkPoolError with its own `stage` tag
+ *   6. the built ix targets the PendingOrder PDA (not the legacy DarkCLOB)
  *
- * The on-chain half (tests 3, 6, 10, 11 — permission group, root-key,
- * phantom-note, notional) lives in `programs/matching_engine/tests/`.
+ * The on-chain half (slot reuse, ConstraintSeeds enforcement, run_batch
+ * matching) lives in `programs/matching_engine/tests/`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Keypair, PublicKey } from "@solana/web3.js";
 
-import { DarkPoolClient, type NoteStatusInfo } from "../src/client.js";
+import { DarkPoolClient } from "../src/client.js";
 import { DarkPoolError } from "../src/errors.js";
 import { UnimplementedProverSuite } from "../src/zk/prover-suite.js";
 import {
@@ -29,6 +27,7 @@ import {
   getOrderSubmitFunction,
   type OrderParams,
 } from "../src/orders/submit-order.js";
+import { pendingOrderPda } from "../src/idl/matching-engine-client.js";
 import type {
   AccountInfoProvider,
   MasterSeedStorage,
@@ -54,7 +53,6 @@ function makeAccountInfoProvider(
 }
 
 function makeClient(opts: {
-  noteStatus?: NoteStatusInfo;
   accountInfoStatuses?: Map<string, { data: Buffer; owner: PublicKey } | null>;
   perRpcUrl?: string;
 }): DarkPoolClient {
@@ -90,17 +88,11 @@ function makeClient(opts: {
     zkProver: new UnimplementedProverSuite(),
     ownerCommitmentBlinding: 0n,
   });
-  if (opts.noteStatus) {
-    // Patch getNoteStatus to return the requested stub without needing PDA derivation.
-    client.getNoteStatus = async (): Promise<NoteStatusInfo> =>
-      opts.noteStatus as NoteStatusInfo;
-  }
   return client;
 }
 
 function makeParams(overrides: Partial<OrderParams> = {}): OrderParams {
   const trading = Keypair.generate().publicKey;
-  const tee = Keypair.generate().publicKey;
   const market = Keypair.generate().publicKey;
   const noteCommitment = new Uint8Array(32);
   for (let i = 0; i < 32; i++) noteCommitment[i] = i + 1;
@@ -111,7 +103,7 @@ function makeParams(overrides: Partial<OrderParams> = {}): OrderParams {
   return {
     tradingKey: trading,
     market,
-    teeAuthority: tee,
+    slotIdx: 0,
     userCommitment,
     noteCommitment,
     amount: 10n,
@@ -124,9 +116,9 @@ function makeParams(overrides: Partial<OrderParams> = {}): OrderParams {
   };
 }
 
-describe("Phase 3 — getOrderSubmitFunction", () => {
-  it("[test_attestation_failure_aborts] throws 'attestation-verify' and sends no tx", async () => {
-    const client = makeClient({ noteStatus: { status: "active" } });
+describe("Privacy-fix submit_order pipeline", () => {
+  it("[attestation-failure] throws 'attestation-verify' and sends no tx", async () => {
+    const client = makeClient({});
     const session = new MockPerSessionManager();
     session.attestationOk = false;
     const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
@@ -137,54 +129,67 @@ describe("Phase 3 — getOrderSubmitFunction", () => {
     expect(session.tokenFetchCount).toBe(0);
   });
 
-  it("[test_order_for_locked_note_rejected] throws 'note-lock-check' when status=locked", async () => {
-    const client = makeClient({ noteStatus: { status: "locked" } });
+  it("[parameter-validation] rejects zero amount", async () => {
+    const client = makeClient({});
     const session = new MockPerSessionManager();
     const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
-    await expect(submit(makeParams())).rejects.toMatchObject({
-      stage: "note-lock-check",
-    });
-    expect(session.sendCallCount).toBe(0);
-  });
-
-  it("[test_order_for_consumed_note_rejected] throws 'note-lock-check' when status=consumed", async () => {
-    const client = makeClient({ noteStatus: { status: "consumed" } });
-    const session = new MockPerSessionManager();
-    const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
-    await expect(submit(makeParams())).rejects.toMatchObject({
-      stage: "note-lock-check",
+    await expect(submit(makeParams({ amount: 0n }))).rejects.toMatchObject({
+      stage: "parameter",
     });
   });
 
-  it("[test_order_inclusion_commitment_returned] happy-path returns receipt + inclusion commitment", async () => {
-    const client = makeClient({ noteStatus: { status: "active" } });
+  it("[parameter-validation] rejects out-of-range slotIdx", async () => {
+    const client = makeClient({});
+    const session = new MockPerSessionManager();
+    const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
+    await expect(submit(makeParams({ slotIdx: 99 }))).rejects.toMatchObject({
+      stage: "parameter",
+    });
+  });
+
+  it("[parameter-validation] rejects 16-byte orderId of wrong length", async () => {
+    const client = makeClient({});
+    const session = new MockPerSessionManager();
+    const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
+    await expect(
+      submit(makeParams({ orderId: new Uint8Array(8) })),
+    ).rejects.toMatchObject({ stage: "parameter" });
+  });
+
+  it("[happy-path] receipt contains the PendingOrder PDA we wrote to", async () => {
+    const client = makeClient({});
     const session = new MockPerSessionManager("happy_sig_ok");
     const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
-    const receipt = await submit(makeParams());
+    const params = makeParams();
+    const receipt = await submit(params);
     expect(receipt.signature).toBe("happy_sig_ok");
-    expect(receipt.orderInclusionCommitment).toHaveLength(32);
-    expect(receipt.darkClobPda).toBeInstanceOf(PublicKey);
-    expect(receipt.noteLockPda).toBeInstanceOf(PublicKey);
+    expect(receipt.pendingOrderPda).toBeInstanceOf(PublicKey);
+    const [expected] = pendingOrderPda(
+      ME_PROGRAM_ID,
+      params.market,
+      params.tradingKey,
+      params.slotIdx,
+    );
+    expect(receipt.pendingOrderPda.toBase58()).toBe(expected.toBase58());
     expect(session.sendCallCount).toBe(1);
     expect(session.lastJwt).toBe("mock_jwt_ok");
   });
 
-  it("[test_jwt_refresh_on_401] on 401 the session manager refreshes and the order succeeds on retry", async () => {
-    const client = makeClient({ noteStatus: { status: "active" } });
+  it("[jwt-refresh-on-401] session manager refreshes once and the order succeeds on retry", async () => {
+    const client = makeClient({});
     const session = new MockPerSessionManager("retry_sig_ok");
     session.injectNext401 = true;
     const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
     const receipt = await submit(makeParams());
     expect(receipt.signature).toBe("retry_sig_ok");
-    // One fetch for the initial call + one for the post-401 refresh.
     expect(session.tokenFetchCount).toBeGreaterThanOrEqual(2);
-    // Second sendInstruction uses the refreshed token — its value differs.
     expect(session.lastJwt).not.toBe("mock_jwt_ok");
     expect(session.sendCallCount).toBe(2);
   });
 
-  it("[test_order_submit_staged_errors] each stage throws with its own `stage` tag", async () => {
-    const client = makeClient({ noteStatus: { status: "active" } });
+  it("[staged-errors] each stage throws DarkPoolError with its own `stage` tag", async () => {
+    const client = makeClient({});
+
     // Stage 1: attestation
     const s1 = new MockPerSessionManager();
     s1.attestationOk = false;
@@ -199,12 +204,6 @@ describe("Phase 3 — getOrderSubmitFunction", () => {
     const f2 = getOrderSubmitFunction({ client }, { perSessionManager: s2 });
     await expect(f2(makeParams())).rejects.toMatchObject({ stage: "auth-token-fetch" });
 
-    // Stage 3: note-lock-check
-    const clientLocked = makeClient({ noteStatus: { status: "locked" } });
-    const s3 = new MockPerSessionManager();
-    const f3 = getOrderSubmitFunction({ client: clientLocked }, { perSessionManager: s3 });
-    await expect(f3(makeParams())).rejects.toMatchObject({ stage: "note-lock-check" });
-
     // Stage 5: transaction-send (non-401, non-retryable)
     const s5 = new MockPerSessionManager();
     s5.injectNextFailure = new DarkPoolError("transaction-send", "rpc-5xx");
@@ -212,21 +211,23 @@ describe("Phase 3 — getOrderSubmitFunction", () => {
     await expect(f5(makeParams())).rejects.toMatchObject({ stage: "transaction-send" });
   });
 
-  it("[test_lock_note_called_on_acceptance — SDK wiring] the built ix targets the NoteLock PDA", async () => {
-    const client = makeClient({ noteStatus: { status: "active" } });
+  it("[ix-targets-pending-order] the built ix lists exactly [trading_key, pendingOrderPda]", async () => {
+    const client = makeClient({});
     const session = new MockPerSessionManager("ok_sig");
     const submit = getOrderSubmitFunction({ client }, { perSessionManager: session });
     const params = makeParams();
     const receipt = await submit(params);
-    // After send, session.lastIx should exist and its accounts include the NoteLock PDA.
     expect(session.lastIx).not.toBeNull();
     const ix = session.lastIx!;
-    const accounts = ix.keys.map((k) => k.pubkey.toBase58());
-    expect(accounts).toContain(receipt.noteLockPda.toBase58());
+    expect(ix.keys).toHaveLength(2);
+    expect(ix.keys[0].pubkey.toBase58()).toBe(params.tradingKey.toBase58());
+    expect(ix.keys[0].isSigner).toBe(true);
+    expect(ix.keys[1].pubkey.toBase58()).toBe(receipt.pendingOrderPda.toBase58());
+    expect(ix.keys[1].isWritable).toBe(true);
   });
 });
 
-describe("Phase 3 — LivePerSessionManager + mock TEE HTTP", () => {
+describe("LivePerSessionManager + mock TEE HTTP", () => {
   let tee: MockTeeServerHandle;
   beforeAll(async () => {
     tee = await startMockTeeServer();
@@ -235,7 +236,7 @@ describe("Phase 3 — LivePerSessionManager + mock TEE HTTP", () => {
     await tee.close();
   });
 
-  it("[test_invalid_jwt_rejected_by_tee] tampered JWT yields 401 from the TEE", async () => {
+  it("[invalid-jwt] tampered JWT yields 401 from the TEE", async () => {
     const kp = Keypair.generate();
     const traderPubkey = kp.publicKey.toBytes();
     const nacl = await import("tweetnacl").catch(() => null as unknown as {
@@ -248,18 +249,15 @@ describe("Phase 3 — LivePerSessionManager + mock TEE HTTP", () => {
         if (nacl) {
           return nacl.sign.detached(nonce, kp.secretKey);
         }
-        // If tweetnacl isn't installed, return a dummy sig — mock server doesn't verify it.
         return new Uint8Array(64);
       },
     });
 
-    // Happy token fetch.
     const attestOk = await mgr.verifyAttestation();
     expect(attestOk).toBe(true);
     const jwt = await mgr.getToken();
     expect(jwt).toMatch(/\./);
 
-    // Tamper the JWT and send — server returns 401, SDK raises auth-token-fetch.
     const tamperedJwt = jwt.split(".")[0] + ".AAAA";
     const dummyIx = {
       keys: [],
@@ -275,7 +273,7 @@ describe("Phase 3 — LivePerSessionManager + mock TEE HTTP", () => {
     ).rejects.toMatchObject({ stage: "auth-token-fetch" });
   });
 
-  it("[attestation-verify via HTTP] verifier returns false when server disables attestation", async () => {
+  it("[attestation-via-http] verifier returns false when server disables attestation", async () => {
     const kp = Keypair.generate();
     tee.setAttestationOk(false);
     const mgr = new LivePerSessionManager({

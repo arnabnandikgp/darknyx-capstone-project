@@ -30,8 +30,8 @@ export interface CancelOrderParams {
   tradingKey: PublicKey;
   /** Market the order lives in. */
   market: PublicKey;
-  /** 16-byte id used at submit time. */
-  orderId: Uint8Array;
+  /** Slot index used at submit time. */
+  slotIdx: number;
 }
 
 export interface CancelOrderReceipt {
@@ -59,8 +59,8 @@ export function getOrderCancelFunction(
   const meProgramId = client.matchingEngineProgramId;
 
   return async (params): Promise<CancelOrderReceipt> => {
-    if (params.orderId.length !== 16) {
-      throw new DarkPoolError("parameter", "orderId must be 16 bytes");
+    if (params.slotIdx < 0 || params.slotIdx > 255) {
+      throw new DarkPoolError("parameter", "slotIdx must be a u8");
     }
 
     const attestOk = await deps.perSessionManager.verifyAttestation();
@@ -86,7 +86,7 @@ export function getOrderCancelFunction(
       programId: meProgramId,
       tradingKey: params.tradingKey,
       market: params.market,
-      orderId: params.orderId,
+      slotIdx: params.slotIdx,
     });
 
     const ctx = { traderPubkey: params.tradingKey.toBytes() };

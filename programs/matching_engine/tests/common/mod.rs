@@ -78,20 +78,22 @@ pub struct InitMarketArgs {
     pub min_order_size: u64,
 }
 
+/// Borsh shape of the privacy-fix `submit_order` args. Mirrors
+/// `programs/matching_engine/src/instructions/submit_order.rs::SubmitOrderArgs`.
 #[derive(BorshSerialize, Clone, Copy)]
 pub struct SubmitOrderArgs {
     pub market: [u8; 32],
-    pub note_commitment: [u8; 32],
-    pub amount: u64,
-    pub price_limit: u64,
+    pub slot_idx: u8,
     pub side: u8,
+    pub order_type: u8,
+    pub _padding: [u8; 5],
+    pub amount: u64,
+    pub min_fill_qty: u64,
+    pub price_limit: u64,
     pub note_amount: u64,
     pub expiry_slot: u64,
     pub order_id: [u8; 16],
-    pub order_type: u8,
-    pub min_fill_qty: u64,
-    /// Phase 5: user_commitment (wallet owner_commitment). Must match the
-    /// WalletEntry PDA seed — callers can't spoof.
+    pub note_commitment: [u8; 32],
     pub user_commitment: [u8; 32],
 }
 
@@ -121,6 +123,23 @@ pub fn wallet_entry_pda(program_id: &Pubkey, commitment: &[u8; 32]) -> (Pubkey, 
 
 pub fn note_lock_pda(program_id: &Pubkey, commitment: &[u8; 32]) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"note_lock", commitment.as_ref()], program_id)
+}
+
+pub fn pending_order_pda(
+    program_id: &Pubkey,
+    market: &Pubkey,
+    trading_key: &Pubkey,
+    slot_idx: u8,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            b"pending_order",
+            market.as_ref(),
+            trading_key.as_ref(),
+            core::slice::from_ref(&slot_idx),
+        ],
+        program_id,
+    )
 }
 
 pub fn consumed_note_pda(program_id: &Pubkey, commitment: &[u8; 32]) -> (Pubkey, u8) {
@@ -315,18 +334,21 @@ impl Harness {
         self.svm.set_account(pda, acct).unwrap();
     }
 
-    pub fn build_submit_order_ix(
+    /// Build a privacy-fix `submit_order` ix. The signer (`trading_key`)
+    /// is `self.trader`. The PendingOrder PDA seed is derived from the
+    /// args' market + slot_idx and the trader pubkey.
+    pub fn build_submit_order_ix(&self, args: SubmitOrderArgs) -> Instruction {
+        self.build_submit_order_ix_for(args, &self.trader)
+    }
+
+    pub fn build_submit_order_ix_for(
         &self,
         args: SubmitOrderArgs,
-        user_commitment: &[u8; 32],
+        trader: &Keypair,
     ) -> Instruction {
         let market = Address::new_from_array(args.market);
-        let (clob_pda, _) = dark_clob_pda(&self.me_id, &market);
-        let (match_pda, _) = matching_config_pda(&self.me_id, &market);
-        let (vault_pda, _) = vault_config_pda(&self.vault_id);
-        let (wallet_pda, _) = wallet_entry_pda(&self.vault_id, user_commitment);
-        let (lock_pda, _) = note_lock_pda(&self.vault_id, &args.note_commitment);
-        let (consumed_probe, _) = consumed_note_pda(&self.vault_id, &args.note_commitment);
+        let (slot_pda, _) =
+            pending_order_pda(&self.me_id, &market, &trader.pubkey(), args.slot_idx);
 
         let mut data = anchor_disc("submit_order").to_vec();
         args.serialize(&mut data).unwrap();
@@ -334,15 +356,32 @@ impl Harness {
         Instruction {
             program_id: self.me_id,
             accounts: vec![
-                AccountMeta::new(self.trader.pubkey(), true),
-                AccountMeta::new(clob_pda, false),
-                AccountMeta::new_readonly(match_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new_readonly(wallet_pda, false),
-                AccountMeta::new(self.tee.pubkey(), true),
-                AccountMeta::new(lock_pda, false),
-                AccountMeta::new_readonly(consumed_probe, false),
-                AccountMeta::new_readonly(self.vault_id, false),
+                AccountMeta::new(trader.pubkey(), true),
+                AccountMeta::new(slot_pda, false),
+            ],
+            data,
+        }
+    }
+
+    /// Build a privacy-fix `init_pending_order_slot` ix.
+    pub fn build_init_pending_order_slot_ix(
+        &self,
+        market: &Pubkey,
+        slot_idx: u8,
+        trader: &Keypair,
+    ) -> Instruction {
+        let (slot_pda, _) =
+            pending_order_pda(&self.me_id, market, &trader.pubkey(), slot_idx);
+
+        let mut data = anchor_disc("init_pending_order_slot").to_vec();
+        data.extend_from_slice(&market.to_bytes());
+        data.push(slot_idx);
+
+        Instruction {
+            program_id: self.me_id,
+            accounts: vec![
+                AccountMeta::new(trader.pubkey(), true),
+                AccountMeta::new(slot_pda, false),
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             ],
             data,
@@ -351,11 +390,186 @@ impl Harness {
 }
 
 // ============================================================================
-// DarkCLOB direct-write helpers for Phase 4 run_batch tests.
+// PendingOrder direct-write helpers for run_batch tests.
 //
-// These bypass `submit_order` (which needs vault.leaf_count > 0 + CPI lock)
-// and stuff well-formed OrderRecords straight into the DarkCLOB data. This
-// is exactly what the on-chain program sees from its zero-copy loader.
+// Mirrors the privacy-fix `PendingOrder` zero-copy layout. We seed the
+// PDA account directly because in litesvm we don't have an ER session
+// — the slot effectively starts pre-delegated for the program to read.
+// ============================================================================
+
+/// Layout MUST match
+/// programs/matching_engine/src/state/pending_order.rs::PendingOrder.
+pub const PENDING_ORDER_DATA_SIZE: usize = 32  // trading_key
+    + 32  // market
+    + 1   // status
+    + 1   // side
+    + 1   // order_type
+    + 1   // slot_idx
+    + 1   // bump
+    + 3   // _padding_a
+    + 8   // arrival_slot
+    + 8   // expiry_slot
+    + 8   // price_limit
+    + 8   // amount
+    + 8   // total_quantity
+    + 8   // filled_quantity
+    + 8   // min_fill_qty
+    + 8   // note_amount
+    + 32  // collateral_note
+    + 32  // user_commitment
+    + 16  // order_id
+    + 8   // _padding_b
+    + 32; // order_inclusion_commitment
+
+#[derive(Clone, Copy, Debug)]
+pub struct PendingSeed {
+    pub trading_key: [u8; 32],
+    pub slot_idx: u8,
+    pub status: u8,
+    pub side: u8,
+    pub order_type: u8,
+    pub arrival_slot: u64,
+    pub expiry_slot: u64,
+    pub price_limit: u64,
+    pub amount: u64,
+    pub total_quantity: u64,
+    pub filled_quantity: u64,
+    pub min_fill_qty: u64,
+    pub note_amount: u64,
+    pub collateral_note: [u8; 32],
+    pub user_commitment: [u8; 32],
+    pub order_id: [u8; 16],
+    pub order_inclusion_commitment: [u8; 32],
+}
+
+/// Build a default PendingSeed (status = Pending, order_type = LIMIT).
+pub fn make_pending_seed(
+    trading_key: [u8; 32],
+    slot_idx: u8,
+    side: u8,
+    price_limit: u64,
+    amount: u64,
+    expiry_slot: u64,
+) -> PendingSeed {
+    let mut collateral_note = [0u8; 32];
+    collateral_note[0] = side;
+    collateral_note[1..9].copy_from_slice(&(slot_idx as u64).to_le_bytes());
+    collateral_note[9..17].copy_from_slice(&price_limit.to_le_bytes());
+    let mut user_commitment = trading_key;
+    user_commitment[0] = 0; // keep < BN254 Fr modulus for Poseidon
+    let mut order_id = [0u8; 16];
+    order_id[0] = side.wrapping_add(1);
+    order_id[1] = slot_idx;
+    order_id[2..10].copy_from_slice(&price_limit.to_le_bytes());
+    let mut oic = [0u8; 32];
+    oic[0] = side;
+    oic[1] = slot_idx;
+    oic[2..10].copy_from_slice(&price_limit.to_le_bytes());
+    PendingSeed {
+        trading_key,
+        slot_idx,
+        status: 1, // Pending
+        side,
+        order_type: 0, // LIMIT
+        arrival_slot: 1,
+        expiry_slot,
+        price_limit,
+        amount,
+        total_quantity: amount,
+        filled_quantity: 0,
+        min_fill_qty: 0,
+        note_amount: amount.saturating_mul(price_limit).max(amount).max(1),
+        collateral_note,
+        user_commitment,
+        order_id,
+        order_inclusion_commitment: oic,
+    }
+}
+
+/// Write a PendingOrder PDA into litesvm's account store with the given
+/// (market, trading_key, slot_idx). Returns the PDA pubkey for use as
+/// remaining_accounts in `run_batch`.
+pub fn seed_pending_order(h: &mut Harness, market: &Pubkey, seed: &PendingSeed) -> Pubkey {
+    use solana_account::Account as SolAccount;
+
+    let trading_key = Address::new_from_array(seed.trading_key);
+    let (pda, bump) = pending_order_pda(&h.me_id, market, &trading_key, seed.slot_idx);
+
+    let mut data = vec![0u8; 8 + PENDING_ORDER_DATA_SIZE];
+    data[0..8].copy_from_slice(&anchor_acct_disc("PendingOrder"));
+    let body = &mut data[8..];
+
+    let mut off = 0;
+    body[off..off + 32].copy_from_slice(&seed.trading_key);
+    off += 32;
+    body[off..off + 32].copy_from_slice(&market.to_bytes());
+    off += 32;
+    body[off] = seed.status;
+    off += 1;
+    body[off] = seed.side;
+    off += 1;
+    body[off] = seed.order_type;
+    off += 1;
+    body[off] = seed.slot_idx;
+    off += 1;
+    body[off] = bump;
+    off += 1;
+    off += 3; // _padding_a
+
+    let put_u64 = |body: &mut [u8], off: &mut usize, v: u64| {
+        body[*off..*off + 8].copy_from_slice(&v.to_le_bytes());
+        *off += 8;
+    };
+    put_u64(body, &mut off, seed.arrival_slot);
+    put_u64(body, &mut off, seed.expiry_slot);
+    put_u64(body, &mut off, seed.price_limit);
+    put_u64(body, &mut off, seed.amount);
+    put_u64(body, &mut off, seed.total_quantity);
+    put_u64(body, &mut off, seed.filled_quantity);
+    put_u64(body, &mut off, seed.min_fill_qty);
+    put_u64(body, &mut off, seed.note_amount);
+
+    body[off..off + 32].copy_from_slice(&seed.collateral_note);
+    off += 32;
+    body[off..off + 32].copy_from_slice(&seed.user_commitment);
+    off += 32;
+    body[off..off + 16].copy_from_slice(&seed.order_id);
+    off += 16;
+    off += 8; // _padding_b
+    body[off..off + 32].copy_from_slice(&seed.order_inclusion_commitment);
+    off += 32;
+    debug_assert_eq!(off, PENDING_ORDER_DATA_SIZE);
+
+    let acct = SolAccount {
+        lamports: h.svm.minimum_balance_for_rent_exemption(data.len()),
+        data,
+        owner: h.me_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    h.svm.set_account(pda, acct).unwrap();
+    pda
+}
+
+/// Read just the `status` byte from a PendingOrder PDA.
+pub fn read_pending_status(h: &Harness, pda: &Pubkey) -> u8 {
+    let acct = h.svm.get_account(pda).expect("pending_order");
+    // 8 (disc) + 32 trading_key + 32 market = offset of status.
+    acct.data[8 + 64]
+}
+
+/// Read the current `amount` (remaining) from a PendingOrder PDA.
+pub fn read_pending_amount(h: &Harness, pda: &Pubkey) -> u64 {
+    let acct = h.svm.get_account(pda).expect("pending_order");
+    // After 8 disc + 32 tk + 32 mkt + 5×u8 + 3 pad = 80 bytes; then
+    // arrival_slot + expiry_slot + price_limit = 24, then amount.
+    let off = 8 + 32 + 32 + 1 + 1 + 1 + 1 + 1 + 3 + 8 + 8 + 8;
+    u64::from_le_bytes(acct.data[off..off + 8].try_into().unwrap())
+}
+
+// ============================================================================
+// LEGACY DarkCLOB direct-write helpers (kept for compatibility — not used
+// by privacy-fix tests).
 // ============================================================================
 
 /// Layout must match `OrderRecord` in
@@ -508,8 +722,12 @@ pub fn compute_budget_ix(cu: u32) -> Instruction {
     }
 }
 
-pub fn build_run_batch_ix(h: &Harness, market: &Pubkey, tee: &Keypair) -> Instruction {
-    let (clob_pda, _) = dark_clob_pda(&h.me_id, market);
+pub fn build_run_batch_ix(
+    h: &Harness,
+    market: &Pubkey,
+    tee: &Keypair,
+    pending_order_pdas: &[Pubkey],
+) -> Instruction {
     let (match_pda, _) = matching_config_pda(&h.me_id, market);
     let (batch_pda, _) = batch_results_pda(&h.me_id, market);
     let (vault_pda, _) = vault_config_pda(&h.vault_id);
@@ -517,38 +735,41 @@ pub fn build_run_batch_ix(h: &Harness, market: &Pubkey, tee: &Keypair) -> Instru
     let mut data = anchor_disc("run_batch").to_vec();
     data.extend_from_slice(&market.to_bytes());
 
+    let mut accounts = vec![
+        AccountMeta::new(tee.pubkey(), true),
+        AccountMeta::new_readonly(match_pda, false),
+        AccountMeta::new(batch_pda, false),
+        AccountMeta::new_readonly(vault_pda, false),
+        AccountMeta::new_readonly(h.pyth_account, false),
+    ];
+    for pda in pending_order_pdas {
+        accounts.push(AccountMeta::new(*pda, false));
+    }
     Instruction {
         program_id: h.me_id,
-        accounts: vec![
-            AccountMeta::new(tee.pubkey(), true),
-            AccountMeta::new(clob_pda, false),
-            AccountMeta::new_readonly(match_pda, false),
-            AccountMeta::new(batch_pda, false),
-            AccountMeta::new_readonly(vault_pda, false),
-            AccountMeta::new_readonly(h.pyth_account, false),
-        ],
+        accounts,
         data,
     }
 }
 
-/// Build a `cancel_order` ix.
+/// Build a privacy-fix `cancel_order` ix.
 pub fn build_cancel_order_ix(
     h: &Harness,
     market: &Pubkey,
-    order_id: &[u8; 16],
+    slot_idx: u8,
     signer: &Keypair,
 ) -> Instruction {
-    let (clob_pda, _) = dark_clob_pda(&h.me_id, market);
+    let (slot_pda, _) = pending_order_pda(&h.me_id, market, &signer.pubkey(), slot_idx);
 
     let mut data = anchor_disc("cancel_order").to_vec();
     data.extend_from_slice(&market.to_bytes());
-    data.extend_from_slice(order_id);
+    data.push(slot_idx);
 
     Instruction {
         program_id: h.me_id,
         accounts: vec![
             AccountMeta::new(signer.pubkey(), true),
-            AccountMeta::new(clob_pda, false),
+            AccountMeta::new(slot_pda, false),
         ],
         data,
     }

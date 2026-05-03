@@ -85,4 +85,12 @@ pub enum MatchingError {
     OrderTooCloseToExpiry,
     #[msg("Fee rate basis-points overflowed u64 when multiplied by notional")]
     FeeOverflow,
+
+    // ---- PendingOrder slot ----
+    #[msg("Pending-order slot index is out of range")]
+    InvalidPendingSlot,
+    #[msg("Pending-order slot is currently occupied by a live order — cancel first")]
+    SlotAlreadyOccupied,
+    #[msg("Pending-order PDA is not owned by the matching_engine program")]
+    PendingOrderInvalidOwner,
 }

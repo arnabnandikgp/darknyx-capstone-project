@@ -13,6 +13,7 @@ import {
   BATCH_RESULTS_SEED,
   DARK_CLOB_SEED,
   MATCHING_CONFIG_SEED,
+  PENDING_ORDER_SEED,
 } from "./seeds.js";
 import { vaultConfigPda, walletEntryPda, noteLockPda, consumedNotePda } from "./vault-client.js";
 
@@ -89,6 +90,35 @@ export function batchResultsPda(
     programId,
   );
 }
+
+/**
+ * `PendingOrder` PDA — one slot per (market, trading_key, slot_idx).
+ * Mirrors `PendingOrder::pda()` in
+ * `programs/matching_engine/src/state/pending_order.rs`.
+ */
+export function pendingOrderPda(
+  programId: PublicKey,
+  market: PublicKey,
+  tradingKey: PublicKey,
+  slotIdx: number,
+): [PublicKey, number] {
+  if (slotIdx < 0 || slotIdx > 255) {
+    throw new Error(`slotIdx must be a u8 (0..255), got ${slotIdx}`);
+  }
+  return PublicKey.findProgramAddressSync(
+    [
+      PENDING_ORDER_SEED,
+      market.toBuffer(),
+      tradingKey.toBuffer(),
+      Uint8Array.of(slotIdx),
+    ],
+    programId,
+  );
+}
+
+/** Maximum concurrent pending orders per (user, market). Mirrors
+ *  `MAX_PENDING_SLOTS_PER_USER` in pending_order.rs. */
+export const MAX_PENDING_SLOTS_PER_USER = 4;
 
 /** Order type enum mirroring `ORDER_TYPE_*` in the program. */
 export enum OrderType {
@@ -190,63 +220,187 @@ export function buildConfigureAccessInstruction(
   });
 }
 
+// ---------------------------------------------------------------------------
+// init_pending_order_slot (L1) + delegate_pending_order (L1)
+// ---------------------------------------------------------------------------
+
+export interface BuildInitPendingOrderSlotParams {
+  programId: PublicKey;
+  /** Owner trading key — fee-payer + only key allowed to write the slot. */
+  tradingKey: PublicKey;
+  market: PublicKey;
+  /** 0..MAX_PENDING_SLOTS_PER_USER. */
+  slotIdx: number;
+}
+
+export function buildInitPendingOrderSlotInstruction(
+  p: BuildInitPendingOrderSlotParams,
+): TransactionInstruction {
+  if (p.slotIdx < 0 || p.slotIdx >= MAX_PENDING_SLOTS_PER_USER) {
+    throw new Error(
+      `slotIdx must be in [0, ${MAX_PENDING_SLOTS_PER_USER}); got ${p.slotIdx}`,
+    );
+  }
+  const [pda] = pendingOrderPda(p.programId, p.market, p.tradingKey, p.slotIdx);
+  const data = cat(
+    anchorDiscriminator("init_pending_order_slot"),
+    p.market.toBytes(),
+    new Uint8Array([p.slotIdx]),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.tradingKey, isSigner: true, isWritable: true },
+      { pubkey: pda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+export interface BuildDelegatePendingOrderParams {
+  programId: PublicKey;
+  /** Pays delegation rent. Often the trading key itself; can be a separate funder. */
+  payer: PublicKey;
+  /** Trading key — second signer on the delegation tx, authorises hand-off. */
+  tradingKey: PublicKey;
+  market: PublicKey;
+  slotIdx: number;
+}
+
+/**
+ * Build a `delegate_pending_order` ix. Hands the slot PDA to the
+ * MagicBlock ER validator. Wire order MUST mirror the `#[delegate]`
+ * macro field-injection pattern. For DelegatePendingOrder { payer:
+ * Signer, trading_key: Signer, pda: AccountInfo(del) }:
+ *
+ *   1. payer
+ *   2. trading_key
+ *   3. buffer_pda                <— injected by macro
+ *   4. delegation_record         <— injected by macro
+ *   5. delegation_metadata       <— injected by macro
+ *   6. pda (the delegated slot)
+ *   7. owner_program (matching_engine)
+ *   8. delegation_program
+ *   9. system_program
+ */
+export function buildDelegatePendingOrderInstruction(
+  p: BuildDelegatePendingOrderParams,
+): TransactionInstruction {
+  if (p.slotIdx < 0 || p.slotIdx >= MAX_PENDING_SLOTS_PER_USER) {
+    throw new Error(
+      `slotIdx must be in [0, ${MAX_PENDING_SLOTS_PER_USER}); got ${p.slotIdx}`,
+    );
+  }
+  const [pda] = pendingOrderPda(p.programId, p.market, p.tradingKey, p.slotIdx);
+
+  const DELEGATION_PROGRAM_ID = new PublicKey(
+    "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh",
+  );
+  const [bufferPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("buffer"), pda.toBuffer()],
+    p.programId,
+  );
+  const [recordPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("delegation"), pda.toBuffer()],
+    DELEGATION_PROGRAM_ID,
+  );
+  const [metadataPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("delegation-metadata"), pda.toBuffer()],
+    DELEGATION_PROGRAM_ID,
+  );
+
+  const data = cat(
+    anchorDiscriminator("delegate_pending_order"),
+    p.market.toBytes(),
+    new Uint8Array([p.slotIdx]),
+  );
+
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.payer, isSigner: true, isWritable: true },
+      { pubkey: p.tradingKey, isSigner: true, isWritable: false },
+      { pubkey: bufferPda, isSigner: false, isWritable: true },
+      { pubkey: recordPda, isSigner: false, isWritable: true },
+      { pubkey: metadataPda, isSigner: false, isWritable: true },
+      { pubkey: pda, isSigner: false, isWritable: true },
+      { pubkey: p.programId, isSigner: false, isWritable: false },
+      { pubkey: DELEGATION_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// submit_order — privacy-fix shape. Single signer, single account write.
+// Sent to the ER RPC; the slot must already be delegated.
+// ---------------------------------------------------------------------------
+
 export interface BuildSubmitOrderParams {
   programId: PublicKey;
-  vaultProgramId: PublicKey;
+  /** Trading key — single signer. Owns the slot via PDA seed. */
   tradingKey: PublicKey;
-  teeAuthority: PublicKey;
   market: PublicKey;
-  userCommitment: Uint8Array; // for walletEntry PDA
-  noteCommitment: Uint8Array;
+  /** 0..MAX_PENDING_SLOTS_PER_USER. */
+  slotIdx: number;
+  /** 0 = bid (buy), 1 = ask (sell). */
+  side: number;
   amount: bigint;
   priceLimit: bigint;
-  side: number; // 0 | 1
+  /** Full note value collateralising this order. */
   noteAmount: bigint;
   expirySlot: bigint;
-  orderId: Uint8Array; // 16 bytes
-  /** 0 = LIMIT, 1 = IOC, 2 = FOK. Defaults to LIMIT. */
+  /** 16-byte client id; zero is rejected. */
+  orderId: Uint8Array;
+  noteCommitment: Uint8Array;
+  /** Owner commitment tied to this trading key. */
+  userCommitment: Uint8Array;
   orderType?: OrderType;
-  /** Minimum base-unit fill qty. 0 = any fill allowed. Defaults to 0. */
   minFillQty?: bigint;
 }
 
 export interface SubmitOrderIxAndKeys {
   ix: TransactionInstruction;
-  darkClobPda: PublicKey;
-  noteLockPda: PublicKey;
-  /** order_inclusion_commitment = SHA-256(seq_no || note_commitment || trading_key).
-   *  Cannot be predicted before the ix runs (seq_no is TEE-assigned), so the SDK
-   *  receives it from the TEE response. We return the raw ingredients here. */
-  commitmentIngredients: {
-    noteCommitment: Uint8Array;
-    tradingKey: Uint8Array;
-  };
+  /** PDA of the PendingOrder slot we wrote to. */
+  pendingOrderPda: PublicKey;
 }
 
 export function buildSubmitOrderInstruction(
   p: BuildSubmitOrderParams,
 ): SubmitOrderIxAndKeys {
-  const [clobPda] = darkClobPda(p.programId, p.market);
-  const [matchPda] = matchingConfigPda(p.programId, p.market);
-  const [vaultCfg] = vaultConfigPda(p.vaultProgramId);
-  const [walletEntry] = walletEntryPda(p.vaultProgramId, p.userCommitment);
-  const [noteLock] = noteLockPda(p.vaultProgramId, p.noteCommitment);
-  const [consumedProbe] = consumedNotePda(p.vaultProgramId, p.noteCommitment);
+  if (p.slotIdx < 0 || p.slotIdx >= MAX_PENDING_SLOTS_PER_USER) {
+    throw new Error(
+      `slotIdx must be in [0, ${MAX_PENDING_SLOTS_PER_USER}); got ${p.slotIdx}`,
+    );
+  }
+  if (p.side !== 0 && p.side !== 1) {
+    throw new Error(`side must be 0 (bid) or 1 (ask); got ${p.side}`);
+  }
+  const [slotPda] = pendingOrderPda(
+    p.programId,
+    p.market,
+    p.tradingKey,
+    p.slotIdx,
+  );
 
-  // Args struct (Borsh, fixed-size fields in declaration order). Must match
-  // `SubmitOrderArgs` in programs/matching_engine/src/instructions/submit_order.rs.
+  // Borsh layout MUST match `SubmitOrderArgs` in
+  // programs/matching_engine/src/instructions/submit_order.rs.
   const argsBytes = cat(
     p.market.toBytes(),
-    fixed32(p.noteCommitment),
-    u64LE(p.amount),
-    u64LE(p.priceLimit),
+    new Uint8Array([p.slotIdx]),
     new Uint8Array([p.side]),
+    new Uint8Array([p.orderType ?? OrderType.Limit]),
+    new Uint8Array(5), // _padding
+    u64LE(p.amount),
+    u64LE(p.minFillQty ?? 0n),
+    u64LE(p.priceLimit),
     u64LE(p.noteAmount),
     u64LE(p.expirySlot),
     fixed16(p.orderId),
-    new Uint8Array([p.orderType ?? OrderType.Limit]),
-    u64LE(p.minFillQty ?? 0n),
-    fixed32(p.userCommitment), // Phase 5: owner-commitment tied to the trading key
+    fixed32(p.noteCommitment),
+    fixed32(p.userCommitment),
   );
 
   const data = cat(anchorDiscriminator("submit_order"), argsBytes);
@@ -255,62 +409,57 @@ export function buildSubmitOrderInstruction(
     programId: p.programId,
     keys: [
       { pubkey: p.tradingKey, isSigner: true, isWritable: true },
-      { pubkey: clobPda, isSigner: false, isWritable: true },
-      { pubkey: matchPda, isSigner: false, isWritable: false },
-      { pubkey: vaultCfg, isSigner: false, isWritable: true },
-      { pubkey: walletEntry, isSigner: false, isWritable: false },
-      { pubkey: p.teeAuthority, isSigner: true, isWritable: true },
-      { pubkey: noteLock, isSigner: false, isWritable: true },
-      { pubkey: consumedProbe, isSigner: false, isWritable: false },
-      { pubkey: p.vaultProgramId, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: slotPda, isSigner: false, isWritable: true },
     ],
     data: Buffer.from(data),
   });
 
-  return {
-    ix,
-    darkClobPda: clobPda,
-    noteLockPda: noteLock,
-    commitmentIngredients: {
-      noteCommitment: p.noteCommitment,
-      tradingKey: p.tradingKey.toBytes(),
-    },
-  };
+  return { ix, pendingOrderPda: slotPda };
 }
 
 // ---------------------------------------------------------------------------
-// cancel_order (Phase 4)
+// cancel_order (privacy-fix shape — operates on a PendingOrder slot via slot_idx)
 // ---------------------------------------------------------------------------
 
 export interface BuildCancelOrderParams {
   programId: PublicKey;
   tradingKey: PublicKey;
   market: PublicKey;
-  orderId: Uint8Array; // 16 bytes
+  /** 0..MAX_PENDING_SLOTS_PER_USER. */
+  slotIdx: number;
 }
 
 export function buildCancelOrderInstruction(
   p: BuildCancelOrderParams,
 ): TransactionInstruction {
-  const [clobPda] = darkClobPda(p.programId, p.market);
+  if (p.slotIdx < 0 || p.slotIdx >= MAX_PENDING_SLOTS_PER_USER) {
+    throw new Error(
+      `slotIdx must be in [0, ${MAX_PENDING_SLOTS_PER_USER}); got ${p.slotIdx}`,
+    );
+  }
+  const [slotPda] = pendingOrderPda(
+    p.programId,
+    p.market,
+    p.tradingKey,
+    p.slotIdx,
+  );
   const data = cat(
     anchorDiscriminator("cancel_order"),
     p.market.toBytes(),
-    fixed16(p.orderId),
+    new Uint8Array([p.slotIdx]),
   );
   return new TransactionInstruction({
     programId: p.programId,
     keys: [
       { pubkey: p.tradingKey, isSigner: true, isWritable: true },
-      { pubkey: clobPda, isSigner: false, isWritable: true },
+      { pubkey: slotPda, isSigner: false, isWritable: true },
     ],
     data: Buffer.from(data),
   });
 }
 
 // ---------------------------------------------------------------------------
-// run_batch (Phase 4)
+// run_batch (privacy-fix shape — PendingOrder PDAs supplied via remaining_accounts)
 // ---------------------------------------------------------------------------
 
 export interface BuildRunBatchParams {
@@ -320,28 +469,30 @@ export interface BuildRunBatchParams {
   teeAuthority: PublicKey;
   market: PublicKey;
   pythAccount: PublicKey;
+  /** PendingOrder PDAs participating in this auction. */
+  pendingOrderPdas: PublicKey[];
 }
 
 export function buildRunBatchInstruction(
   p: BuildRunBatchParams,
 ): TransactionInstruction {
-  const [clobPda] = darkClobPda(p.programId, p.market);
   const [matchPda] = matchingConfigPda(p.programId, p.market);
   const [batchPda] = batchResultsPda(p.programId, p.market);
-  // Phase 5: `vault_config` is a read-only snapshot; PDA is derived under the
-  // vault program id via `seeds::program = vault::ID` in the on-chain struct.
   const [vaultCfg] = vaultConfigPda(p.vaultProgramId);
   const data = cat(anchorDiscriminator("run_batch"), p.market.toBytes());
+  const keys = [
+    { pubkey: p.teeAuthority, isSigner: true, isWritable: true },
+    { pubkey: matchPda, isSigner: false, isWritable: false },
+    { pubkey: batchPda, isSigner: false, isWritable: true },
+    { pubkey: vaultCfg, isSigner: false, isWritable: false },
+    { pubkey: p.pythAccount, isSigner: false, isWritable: false },
+  ];
+  for (const pda of p.pendingOrderPdas) {
+    keys.push({ pubkey: pda, isSigner: false, isWritable: true });
+  }
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [
-      { pubkey: p.teeAuthority, isSigner: true, isWritable: true },
-      { pubkey: clobPda, isSigner: false, isWritable: true },
-      { pubkey: matchPda, isSigner: false, isWritable: false },
-      { pubkey: batchPda, isSigner: false, isWritable: true },
-      { pubkey: vaultCfg, isSigner: false, isWritable: false },
-      { pubkey: p.pythAccount, isSigner: false, isWritable: false },
-    ],
+    keys,
     data: Buffer.from(data),
   });
 }

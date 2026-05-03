@@ -77,6 +77,7 @@ import {
 import {
   buildCreateWalletInstruction,
   buildDepositInstruction,
+  buildLockNoteInstruction,
   buildWithdrawInstruction,
   vaultConfigPda,
   walletEntryPda,
@@ -84,9 +85,11 @@ import {
 import {
   buildRunBatchInstruction,
   buildSubmitOrderInstruction,
+  buildInitPendingOrderSlotInstruction,
   batchResultsPda,
   darkClobPda,
   matchingConfigPda,
+  pendingOrderPda,
   OrderType,
 } from "../src/idl/matching-engine-client.js";
 import {
@@ -615,67 +618,94 @@ maybeDescribe("Phase 5 devnet E2E — trade flow (deposit → match → settle �
       await depositNote(bob, baseMint, BOB_DEPOSIT, bobBaseAta);
 
       // ─────────────────────────────────────────────────────────────────────
-      step(6, "Submit orders (TEE + trading-key co-signed; CPIs into lock_note)");
+      step(6, "Init PendingOrder slots (L1) + submit orders (privacy-fix shape)");
       // ─────────────────────────────────────────────────────────────────────
+      note(
+        "PRODUCTION PATH: PendingOrder slots are init+delegated on L1, then " +
+          "submit_order writes order intent INSIDE the ER (invisible to L1). " +
+          "This L1-only devnet test runs submit_order against the L1 RPC — " +
+          "the ix logic is identical, but the privacy property only obtains " +
+          "when the slot is actually delegated. See er-trade-flow.test.ts for " +
+          "the full delegate → ER → undelegate cycle.",
+      );
       const aliceOrderId = new Uint8Array(16); aliceOrderId[0] = 0xA1;
       const bobOrderId = new Uint8Array(16); bobOrderId[0] = 0xB0;
       const now = await connection.getSlot("confirmed");
       const expiry = BigInt(now) + 500n;
+      const ALICE_SLOT = 0;
+      const BOB_SLOT = 0;
+
+      async function ensureSlotInit(p: Persona, slotIdx: number) {
+        const [pda] = pendingOrderPda(
+          meProgramId, market, p.tradingKey.publicKey, slotIdx,
+        );
+        const existing = await connection.getAccountInfo(pda, "confirmed");
+        if (existing) {
+          bullet(`${p.name} slot[${slotIdx}] exists — skip init`);
+          return;
+        }
+        const initTx = new Transaction().add(
+          buildInitPendingOrderSlotInstruction({
+            programId: meProgramId,
+            tradingKey: p.tradingKey.publicKey,
+            market,
+            slotIdx,
+          }),
+        );
+        const sig = await sendAndConfirmTransaction(
+          connection, initTx, [p.tradingKey], { commitment: "confirmed" },
+        );
+        txline(`${p.name}: init_pending_order_slot[${slotIdx}]`, sig);
+      }
 
       async function submitOrder(
-        p: Persona,
-        side: 0 | 1,
-        amount: bigint,
-        priceLimit: bigint,
-        orderId: Uint8Array,
+        p: Persona, slotIdx: number,
+        side: 0 | 1, amount: bigint, priceLimit: bigint, orderId: Uint8Array,
       ) {
-        // `note_amount` is the deposited note's NATIVE-currency size:
-        //   - BUY note: QUOTE (amount*price + buyer_fee on-chain).
-        //   - SELL note: BASE (amount + seller_fee on-chain).
-        // This MUST equal the deposit for run_batch's conservation law:
-        //   note.amount == trade_leg + change_leg + fee_leg
-        // Submit_order's own collateral check is side-aware after the
-        // program patch in programs/matching_engine/src/instructions/submit_order.rs.
         const { ix: submitIx } = buildSubmitOrderInstruction({
           programId: meProgramId,
           tradingKey: p.tradingKey.publicKey,
-          vaultProgramId,
-          teeAuthority: teeKeypair.publicKey,
           market,
+          slotIdx,
           userCommitment: p.userCommitment,
           noteCommitment: p.depositNote!.commitment,
-          amount,
-          priceLimit,
-          side,
+          amount, priceLimit, side,
           noteAmount: p.depositNote!.amount,
           expirySlot: expiry,
           orderId,
           orderType: OrderType.Limit,
         });
         const tx = new Transaction().add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
           submitIx,
         );
         const sig = await sendAndConfirmTransaction(
-          connection, tx, [p.tradingKey, teeKeypair],
-          { commitment: "confirmed" },
+          connection, tx, [p.tradingKey], { commitment: "confirmed" },
         );
         txline(
           `${p.name}: submit_order ${side === 0 ? "BUY" : "SELL"} ${amount} @ ${priceLimit}`,
           sig,
         );
       }
-      await submitOrder(alice, /* buy  */ 0, BASE_AMT, PRICE, aliceOrderId);
-      await submitOrder(bob,   /* sell */ 1, BASE_AMT, PRICE, bobOrderId);
+
+      await ensureSlotInit(alice, ALICE_SLOT);
+      await ensureSlotInit(bob,   BOB_SLOT);
+      await submitOrder(alice, ALICE_SLOT, /* buy  */ 0, BASE_AMT, PRICE, aliceOrderId);
+      await submitOrder(bob,   BOB_SLOT,   /* sell */ 1, BASE_AMT, PRICE, bobOrderId);
 
       // ─────────────────────────────────────────────────────────────────────
       step(7, "run_batch (on L1) — find crossing, write MatchResult + FeeAccumulator flush");
       // ─────────────────────────────────────────────────────────────────────
       note(
-        "PRODUCTION PATH: run_batch lives inside the MagicBlock ER validator " +
-          "(delegated DarkCLOB). This test calls it directly on devnet L1 — " +
-          "the ix accepts L1 calls fine. See scripts/dev-commands.md §9 for " +
-          "the production delegate → run_in_ER → undelegate cycle.",
+        "PRODUCTION PATH: run_batch lives inside the MagicBlock ER validator. " +
+          "This test calls it directly on devnet L1 — the ix accepts L1 calls " +
+          "fine. See scripts/dev-commands.md §11 for the delegate → ER cycle.",
+      );
+      const [aliceSlotPda] = pendingOrderPda(
+        meProgramId, market, alice.tradingKey.publicKey, ALICE_SLOT,
+      );
+      const [bobSlotPda] = pendingOrderPda(
+        meProgramId, market, bob.tradingKey.publicKey, BOB_SLOT,
       );
       const rbTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
@@ -685,6 +715,7 @@ maybeDescribe("Phase 5 devnet E2E — trade flow (deposit → match → settle �
           teeAuthority: teeKeypair.publicKey,
           market,
           pythAccount,
+          pendingOrderPdas: [aliceSlotPda, bobSlotPda],
         }),
       );
       const rbSig = await sendAndConfirmTransaction(
@@ -776,8 +807,40 @@ maybeDescribe("Phase 5 devnet E2E — trade flow (deposit → match → settle �
       bullet(`TEE signature (first 8 bytes): 0x${toHex(sig.slice(0, 8))}…`);
 
       // ─────────────────────────────────────────────────────────────────────
-      step(10, "tee_forced_settle on L1 — Ed25519 precompile + settle ix");
+      step(10, "lock_note×2 (L1) then Ed25519 + tee_forced_settle (L1)");
       // ─────────────────────────────────────────────────────────────────────
+      note(
+        "Privacy-fix settlement: submit_order no longer creates NoteLock " +
+          "PDAs. The TEE allocates them at settle time, but the combined " +
+          "tx exceeds the 1232-byte cap so we send two L1 txs (lock_note×2, " +
+          "then Ed25519 + tee_forced_settle). Privacy unaffected: lock_note " +
+          "only references note commitments + amounts already public on L1.",
+      );
+      const lockTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        buildLockNoteInstruction({
+          programId: vaultProgramId,
+          teeAuthority: teeKeypair.publicKey,
+          noteCommitment: alice.depositNote!.commitment,
+          orderId: aliceOrderId,
+          expirySlot: expiry,
+          amount: ALICE_DEPOSIT,
+        }),
+        buildLockNoteInstruction({
+          programId: vaultProgramId,
+          teeAuthority: teeKeypair.publicKey,
+          noteCommitment: bob.depositNote!.commitment,
+          orderId: bobOrderId,
+          expirySlot: expiry,
+          amount: BOB_DEPOSIT,
+        }),
+      );
+      const lockSig = await sendAndConfirmTransaction(
+        connection, lockTx, [teeKeypair],
+        { commitment: "confirmed" },
+      );
+      txline("lock_note(note_a) + lock_note(note_b)", lockSig);
+
       const settleTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
         buildEd25519VerifyIx({
@@ -795,7 +858,7 @@ maybeDescribe("Phase 5 devnet E2E — trade flow (deposit → match → settle �
         connection, settleTx, [teeKeypair],
         { commitment: "confirmed" },
       );
-      txline("tee_forced_settle — appends note_c/d + fee note, consumes nulls", settleSig);
+      txline("Ed25519 + tee_forced_settle", settleSig);
 
       // Shadow tree: note_c, note_d, note_fee are appended in that order by
       // the on-chain tee_forced_settle (matching its append sequence).

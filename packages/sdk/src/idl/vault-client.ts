@@ -325,6 +325,50 @@ export interface BuildWithdrawParams {
   proof: Groth16OnChainProof;
 }
 
+// ---------------------------------------------------------------------------
+// lock_note (TEE-signed). Allocates a NoteLock PDA on L1. Used at settle
+// time to atomically lock both buyer + seller notes inside the same tx
+// that calls `tee_forced_settle`.
+// ---------------------------------------------------------------------------
+
+export interface BuildLockNoteParams {
+  programId: PublicKey;
+  /** Must equal `vault_config.tee_pubkey`. Pays the rent for the new PDA. */
+  teeAuthority: PublicKey;
+  noteCommitment: Uint8Array;
+  /** 16-byte order id used for `tee_forced_settle` cross-check. */
+  orderId: Uint8Array;
+  expirySlot: bigint;
+  amount: bigint;
+}
+
+export function buildLockNoteInstruction(
+  p: BuildLockNoteParams,
+): TransactionInstruction {
+  const [vaultPda] = vaultConfigPda(p.programId);
+  const [noteLock] = noteLockPda(p.programId, p.noteCommitment);
+  if (p.orderId.length !== 16) {
+    throw new Error(`orderId must be 16 bytes, got ${p.orderId.length}`);
+  }
+  const data = cat(
+    anchorDiscriminator("lock_note"),
+    fixed32(p.noteCommitment),
+    new Uint8Array(p.orderId),
+    u64LE(p.expirySlot),
+    u64LE(p.amount),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.teeAuthority, isSigner: true, isWritable: true },
+      { pubkey: vaultPda, isSigner: false, isWritable: false },
+      { pubkey: noteLock, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
 export function buildWithdrawInstruction(p: BuildWithdrawParams): TransactionInstruction {
   const [vaultPda] = vaultConfigPda(p.programId);
   const [vaultTokenAcct] = vaultTokenAccountPda(p.programId, p.tokenMint);

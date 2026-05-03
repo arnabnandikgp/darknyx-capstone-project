@@ -78,23 +78,21 @@ function makeClient(opts: { noteStatus?: NoteStatusInfo } = {}): DarkPoolClient 
 function makeCancelParams(
   overrides: Partial<CancelOrderParams> = {},
 ): CancelOrderParams {
-  const orderId = new Uint8Array(16);
-  for (let i = 0; i < 16; i++) orderId[i] = 0xa0 + i;
   return {
     tradingKey: Keypair.generate().publicKey,
     market: Keypair.generate().publicKey,
-    orderId,
+    slotIdx: 0,
     ...overrides,
   };
 }
 
-describe("Phase 4 — getOrderCancelFunction", () => {
-  it("[cancel_param_orderid_length] rejects orderId shorter than 16 bytes", async () => {
+describe("Privacy-fix — getOrderCancelFunction", () => {
+  it("[cancel_param_slotidx_range] rejects out-of-range slotIdx", async () => {
     const client = makeClient();
     const session = new MockPerSessionManager();
     const fn = getOrderCancelFunction({ client }, { perSessionManager: session });
     await expect(
-      fn(makeCancelParams({ orderId: new Uint8Array(8) })),
+      fn(makeCancelParams({ slotIdx: -1 })),
     ).rejects.toMatchObject({ stage: "parameter" });
     expect(session.sendCallCount).toBe(0);
   });
@@ -133,23 +131,22 @@ describe("Phase 4 — getOrderCancelFunction", () => {
     expect(session.sendCallCount).toBe(2);
   });
 
-  it("[cancel_ix_layout] cancel_order ix carries discriminator + market + order_id", () => {
+  it("[cancel_ix_layout] cancel_order ix carries discriminator + market + slot_idx", () => {
     const market = Keypair.generate().publicKey;
-    const orderId = new Uint8Array(16);
-    for (let i = 0; i < 16; i++) orderId[i] = i;
     const ix = buildCancelOrderInstruction({
       programId: ME_PROGRAM_ID,
       tradingKey: Keypair.generate().publicKey,
       market,
-      orderId,
+      slotIdx: 2,
     });
-    // 8 (disc) + 32 (market) + 16 (order_id) = 56 bytes.
-    expect(ix.data.length).toBe(56);
+    // 8 (disc) + 32 (market) + 1 (slot_idx) = 41 bytes.
+    expect(ix.data.length).toBe(41);
     expect(ix.data.subarray(8, 40).equals(market.toBuffer())).toBe(true);
-    expect(ix.data.subarray(40, 56).equals(Buffer.from(orderId))).toBe(true);
-    // Accounts: signer + dark_clob. 2 keys.
+    expect(ix.data[40]).toBe(2);
+    // Accounts: signer + pending_order PDA. 2 keys.
     expect(ix.keys.length).toBe(2);
     expect(ix.keys[0].isSigner).toBe(true);
+    expect(ix.keys[1].isWritable).toBe(true);
   });
 
   it("[cancel_ignores_note_status] cancel never queries note_lock status (lock stays until expiry)", async () => {

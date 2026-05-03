@@ -384,17 +384,26 @@ describe block) but gated on `RUN_DEVNET_PARTIAL_FILL=1`.
 
 ## 11. Devnet E2E — ER (MagicBlock Ephemeral Rollup) cycle
 
-### 11.0 Architecture in one paragraph
+### 11.0 Architecture in one paragraph (PRIVACY-FIX SHAPE)
 
-Three market PDAs (`DarkCLOB`, `MatchingConfig`, `BatchResults`) are
-**delegated** on L1 to the MagicBlock ER validator, `run_batch` runs
-**inside the ER session**, then we CPI `ScheduleCommitAndUndelegate`
-which commits the new state back to L1 and returns the PDAs to
-`matching_engine` ownership. Settlement (`tee_forced_settle`) and
-withdraws happen on L1 as usual.
-
-`submit_order` currently still runs **on L1** in the test — see §11.5
-for why and what's planned.
+Each user owns a small set of `PendingOrder` PDAs (one per slot, max 4
+per user per market). Each PDA is created EMPTY on L1
+(`init_pending_order_slot`) — the L1 init tx contains zero order
+intent. The slot is then **delegated** to the MagicBlock ER validator
+(`delegate_pending_order`). The market PDAs (`DarkCLOB`,
+`MatchingConfig`, `BatchResults`) are also delegated. From this point
+on, **`submit_order` writes order intent (side / amount / price /
+note_commitment / user_commitment) directly into the user's delegated
+slot via the ER RPC**. The order details NEVER appear in any L1
+transaction. `run_batch` reads all participating slots inside the ER,
+runs the uniform-clearing-price match, and writes results to the
+delegated `BatchResults`. `commit_market_state` /
+`undelegate_market` push aggregate state back to L1; individual
+PendingOrder slots stay delegated indefinitely (and are reset to
+Empty / Matched after each batch). Settlement (`tee_forced_settle`)
+on L1 still requires `note_lock_a/b` PDAs — since `submit_order` no
+longer creates them, the TEE allocates both inside the same atomic L1
+tx as `tee_forced_settle`.
 
 ### 11.1 Prerequisites
 
@@ -436,13 +445,14 @@ RUN_ER_E2E=1 \
 | 3 | L1      | Mint BASE / QUOTE to payer ATAs                                      |
 | 4 | L1      | `create_wallet` (VALID_WALLET_CREATE proof)                          |
 | 5 | L1      | `deposit` → shadow tree sync                                         |
-| 6 | L1      | `submit_order` x2 (CPIs `vault::lock_note`)                           |
-| 7 | **L1**  | **`delegate_dark_clob` + `delegate_matching_config` + `delegate_batch_results`** (atomic) |
-| 8 | **ER**  | **`run_batch`** — matches Alice vs Bob inside the rollup             |
-| 9 | **ER**  | **`undelegate_market`** (CPIs `ScheduleCommitAndUndelegate`)          |
+| 6 | **L1**  | **`init_pending_order_slot` + `delegate_pending_order`** (per persona, EMPTY slot then delegated to ER) |
+| 7 | L1      | `delegate_dark_clob` + `delegate_matching_config` + `delegate_batch_results` (atomic) |
+| 8 | **ER**  | **`submit_order` x2** — order intents stay inside the rollup         |
+| 8.5| **ER** | **`run_batch`** — matches Alice vs Bob from delegated slots          |
+| 9 | **ER**  | `undelegate_market` (CPIs `ScheduleCommitAndUndelegate`) — pushes BatchResults to L1; PendingOrder slots stay delegated |
 | 10| L1 poll | Wait for L1 BatchResults to reflect the ER commit (hash changes)     |
 | 11| L1      | Build MatchResultPayload + TEE-sign canonical hash                   |
-| 12| L1      | `tee_forced_settle` (Ed25519 + settle ix)                            |
+| 12| L1      | `lock_note(note_a)` + `lock_note(note_b)` + Ed25519 + `tee_forced_settle` (atomic) |
 | 13| L1      | VALID_SPEND withdraws — Alice receives BASE, Bob receives QUOTE      |
 
 ### 11.4 Personas are ER-independent
@@ -454,12 +464,13 @@ against the same devnet vault (after a setup wipe) without
 
 ### 11.5 Deliberate shortcuts still in the ER flow (track as TODOs)
 
-1. **`submit_order` is still on L1.** The order payload (`amount`,
-   `price_limit`, `side`) is therefore visible in devnet tx logs.
-   *Moving this into the ER session is the single biggest remaining
-   work item for a true darkpool (see §13 below).*
-2. **TEE is a local `Keypair`.** Real deployment pins the keypair
+1. **TEE is a local `Keypair`.** Real deployment pins the keypair
    inside a TDX/SEV enclave + remote-attestation handshake.
+2. **`submit_order` is sent to the ER RPC directly via the
+   trading-key.** Production deploys gate the ER RPC behind the PER
+   JWT session manager so even the L1-side observer doesn't see
+   request/response sizes correlated with order arrival. The on-chain
+   PDA-write is identical either way.
 3. **TRADE_ROLE_\* test-only derivation.** `note_c` / `note_d`
    plaintexts are reconstructed off-chain via
    `SHA-256(domain_tag, match_id, role)`. In production the TEE ships
@@ -471,6 +482,10 @@ against the same devnet vault (after a setup wipe) without
    `undelegate_market`. In production the TEE would call
    `commit_market_state` (keeps delegation) every N slots so
    settlement can pick up matches without a full undelegate cycle.
+6. **PendingOrder slots stay delegated forever.** No automatic
+   un-delegation if a user wants to release their slots back to L1
+   (e.g. to refund rent). Add `undelegate_pending_order` once the UX
+   needs it.
 
 ---
 
@@ -492,18 +507,23 @@ against the same devnet vault (after a setup wipe) without
 
 ## 13. What is NOT yet on devnet (v1 open work)
 
-See the response block in chat for the full backlog. Highlights:
+The privacy fix (PendingOrder PDA + ER-only `submit_order`) closes the
+biggest open item. Remaining backlog:
 
-1. **Move `submit_order` into the ER session** so order intents stay
-   private — currently public on L1.
-2. Real TDX/SEV TEE + remote attestation (Phase 6).
-3. Browser prover (`WebProverSuite`) replacing the snarkjs shell-out.
-4. Partial-fill + re-lock scenario exercised on devnet (code paths
-   exist; test harness stub-only).
-5. Cancel-order via ER (currently L1-only; blocked on step 1).
-6. Emergency `force_undelegate_on_l1` admin ix (pressure valve).
-7. Real protocol-owner keypair for fee withdrawal (currently a
+1. **Real TDX/SEV TEE + remote attestation** (Phase 6) — currently a
+   local nacl keypair plays the TEE role.
+2. **Browser prover** (`WebProverSuite`) replacing the snarkjs shell-out.
+3. **Partial-fill + re-lock scenario** exercised on devnet (code paths
+   exist; ER test only covers exact fill).
+4. **`undelegate_pending_order`** to release a user's slots back to
+   L1 (so they can refund rent).
+5. **Emergency `force_undelegate_on_l1`** admin ix (pressure valve if
+   ER is down).
+6. **Real protocol-owner keypair** for fee withdrawal (currently a
    synthetic tag — fee notes accumulate but can't be spent).
-8. Continuous ER ↔ L1 commit scheduler inside the TEE loop.
-9. Oracle refresh inside long-running ER sessions (clone-at-open only
-   today).
+7. **Continuous ER ↔ L1 commit scheduler** inside the TEE loop.
+8. **Oracle refresh inside long-running ER sessions** (clone-at-open
+   only today).
+9. **PER JWT session manager** wired into the ER trade-flow test (the
+   submit_order privacy property is on-chain regardless, but the
+   network-side anonymity-set requires JWT-gated ingress).

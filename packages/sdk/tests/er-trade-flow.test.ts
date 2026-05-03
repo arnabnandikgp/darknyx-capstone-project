@@ -77,11 +77,13 @@ import {
 import {
   buildRunBatchInstruction,
   buildSubmitOrderInstruction,
+  buildInitPendingOrderSlotInstruction,
+  buildDelegatePendingOrderInstruction,
   batchResultsPda,
+  pendingOrderPda,
   OrderType,
 } from "../src/idl/matching-engine-client.js";
 import {
-  buildCommitMarketStateInstruction,
   buildDelegateBatchResultsInstruction,
   buildDelegateDarkClobInstruction,
   buildDelegateMatchingConfigInstruction,
@@ -89,6 +91,9 @@ import {
   openDualConnections,
   waitForL1AccountChange,
 } from "../src/idl/er-client.js";
+import {
+  buildLockNoteInstruction,
+} from "../src/idl/vault-client.js";
 import {
   buildEd25519VerifyIx,
   buildSettleIx,
@@ -498,48 +503,59 @@ maybeDescribe(
         await depositNote(bob, baseMint, BOB_DEPOSIT, bobBaseAta);
 
         // ─────────────────────────────────────────────────────────────────
-        step(6, "submit_order x2 (L1) — CPIs vault::lock_note; orders land in DarkCLOB");
+        step(6, "init + delegate PendingOrder slots (L1) — privacy-fix setup");
         // ─────────────────────────────────────────────────────────────────
         noteLine(
-          "submit_order runs on L1 because it creates `note_lock` PDAs via " +
-          "vault::lock_note CPI. L1 is the only place ephemeral init-PDAs " +
-          "land cleanly without ER↔L1 commit choreography. The DarkCLOB " +
-          "write happens on L1 too — we'll hand the account to ER AFTER " +
-          "both orders are in the book.",
+          "One PendingOrder PDA per (user, market, slot_idx). Created EMPTY " +
+          "on L1 — the L1 init tx contains zero order intent. Then handed " +
+          "to the ER validator. From this point on the slot is only " +
+          "writable inside the ER session.",
         );
-        const aliceOrderId = new Uint8Array(16); aliceOrderId[0] = 0xA1;
-        const bobOrderId   = new Uint8Array(16); bobOrderId[0]   = 0xB0;
-        const now = await l1.getSlot("confirmed");
-        const expiry = BigInt(now) + 500n;
-
-        async function submitOrder(
-          p: Persona, side: 0 | 1, amount: bigint, priceLimit: bigint, oid: Uint8Array,
-        ) {
-          const { ix } = buildSubmitOrderInstruction({
-            programId: meProgramId,
-            tradingKey: p.tradingKey.publicKey,
-            vaultProgramId,
-            teeAuthority: teeKeypair.publicKey,
+        const ALICE_SLOT = 0;
+        const BOB_SLOT = 0;
+        for (const [persona, slotIdx] of [
+          [alice, ALICE_SLOT] as const,
+          [bob, BOB_SLOT] as const,
+        ]) {
+          const [slotPda] = pendingOrderPda(
+            meProgramId,
             market,
-            userCommitment: p.userCommitment,
-            noteCommitment: p.depositNote!.commitment,
-            amount, priceLimit, side,
-            noteAmount: p.depositNote!.amount,
-            expirySlot: expiry,
-            orderId: oid,
-            orderType: OrderType.Limit,
-          });
-          const tx = new Transaction().add(
-            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-            ix,
+            persona.tradingKey.publicKey,
+            slotIdx,
           );
-          const sig = await sendAndConfirmTransaction(
-            l1, tx, [p.tradingKey, teeKeypair], { commitment: "confirmed" },
+          const existingSlot = await l1.getAccountInfo(slotPda, "confirmed");
+          if (existingSlot && existingSlot.owner.toBase58() !== meProgramId.toBase58()) {
+            // Slot already delegated from a prior run — skip both ixs.
+            bullet(`${persona.name} slot[${slotIdx}] already delegated — skip`);
+            continue;
+          }
+          const initTx = new Transaction().add(
+            buildInitPendingOrderSlotInstruction({
+              programId: meProgramId,
+              tradingKey: persona.tradingKey.publicKey,
+              market,
+              slotIdx,
+            }),
           );
-          txline(`${p.name}: submit_order ${side === 0 ? "BUY" : "SELL"} ${amount} @ ${priceLimit}`, sig);
+          const initSig = await sendAndConfirmTransaction(
+            l1, initTx, [persona.tradingKey], { commitment: "confirmed" },
+          );
+          txline(`${persona.name}: init_pending_order_slot[${slotIdx}]`, initSig);
+
+          const delSlotTx = new Transaction().add(
+            buildDelegatePendingOrderInstruction({
+              programId: meProgramId,
+              payer: funder.publicKey,
+              tradingKey: persona.tradingKey.publicKey,
+              market,
+              slotIdx,
+            }),
+          );
+          const delSlotSig = await sendAndConfirmTransaction(
+            l1, delSlotTx, [funder, persona.tradingKey], { commitment: "confirmed" },
+          );
+          txline(`${persona.name}: delegate_pending_order[${slotIdx}]`, delSlotSig);
         }
-        await submitOrder(alice, 0, BASE_AMT, PRICE, aliceOrderId);
-        await submitOrder(bob,   1, BASE_AMT, PRICE, bobOrderId);
 
         // ─────────────────────────────────────────────────────────────────
         step(7, "DELEGATE market PDAs (L1) — DarkCLOB + MatchingConfig + BatchResults");
@@ -569,13 +585,57 @@ maybeDescribe(
         txline("delegated DarkCLOB + MatchingConfig + BatchResults to ER validator", delSig);
 
         // ─────────────────────────────────────────────────────────────────
-        step(8, "run_batch on ER — matches Alice vs Bob inside the rollup");
+        step(8, "submit_order x2 (ER) — order intents stay inside the rollup");
         // ─────────────────────────────────────────────────────────────────
         noteLine(
-          "This transaction goes to the MagicBlock ER RPC, not L1. The " +
-          "validator routes the delegated PDAs to the owner program " +
-          "(matching_engine) which executes run_batch with full write " +
-          "access. vault_config + Pyth feed are read-only clones.",
+          "This is the privacy-fix payoff. submit_order writes (side, amount, " +
+          "price_limit, note_commitment) directly into the delegated " +
+          "PendingOrder slot. Tx is sent to the ER RPC — order details NEVER " +
+          "appear in any L1 transaction log. In production this goes through " +
+          "the authenticated PER session (JWT-gated); the test signs with " +
+          "the trading_key and routes via the same ER connection.",
+        );
+        const aliceOrderId = new Uint8Array(16); aliceOrderId[0] = 0xA1;
+        const bobOrderId   = new Uint8Array(16); bobOrderId[0]   = 0xB0;
+        const now = await l1.getSlot("confirmed");
+        const expiry = BigInt(now) + 500n;
+
+        async function submitOrderEr(
+          p: Persona, slotIdx: number, side: 0 | 1, amount: bigint, priceLimit: bigint, oid: Uint8Array,
+        ) {
+          const { ix } = buildSubmitOrderInstruction({
+            programId: meProgramId,
+            tradingKey: p.tradingKey.publicKey,
+            market,
+            slotIdx,
+            userCommitment: p.userCommitment,
+            noteCommitment: p.depositNote!.commitment,
+            amount, priceLimit, side,
+            noteAmount: p.depositNote!.amount,
+            expirySlot: expiry,
+            orderId: oid,
+            orderType: OrderType.Limit,
+          });
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            ix,
+          );
+          const sig = await sendAndConfirmTransaction(
+            er, tx, [p.tradingKey], { commitment: "confirmed" },
+          );
+          txline(`${p.name}: submit_order ${side === 0 ? "BUY" : "SELL"} ${amount} @ ${priceLimit}`, sig, "er");
+        }
+        await submitOrderEr(alice, ALICE_SLOT, 0, BASE_AMT, PRICE, aliceOrderId);
+        await submitOrderEr(bob,   BOB_SLOT,   1, BASE_AMT, PRICE, bobOrderId);
+
+        // ─────────────────────────────────────────────────────────────────
+        step(8.5 as unknown as number, "run_batch on ER — matches Alice vs Bob from delegated slots");
+        // ─────────────────────────────────────────────────────────────────
+        const [aliceSlotPda] = pendingOrderPda(
+          meProgramId, market, alice.tradingKey.publicKey, ALICE_SLOT,
+        );
+        const [bobSlotPda] = pendingOrderPda(
+          meProgramId, market, bob.tradingKey.publicKey, BOB_SLOT,
         );
         const rbTx = new Transaction().add(
           ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
@@ -585,6 +645,7 @@ maybeDescribe(
             teeAuthority: teeKeypair.publicKey,
             market,
             pythAccount,
+            pendingOrderPdas: [aliceSlotPda, bobSlotPda],
           }),
         );
         const rbSig = await sendAndConfirmTransaction(
@@ -682,8 +743,44 @@ maybeDescribe(
         bullet(`canonical hash: 0x${toHex(msg).slice(0, 16)}…`);
 
         // ─────────────────────────────────────────────────────────────────
-        step(12, "tee_forced_settle (L1) — Ed25519 precompile + settle ix");
+        step(12, "lock_note×2 (L1) then Ed25519 + tee_forced_settle (L1)");
         // ─────────────────────────────────────────────────────────────────
+        noteLine(
+          "Privacy-fix settlement: since submit_order no longer creates " +
+          "NoteLock PDAs (it never touched the vault program), the TEE " +
+          "must allocate them at settle time. The combined tx exceeds " +
+          "the 1232-byte tx cap, so we send TWO L1 txs:\n" +
+          "  (12a) lock_note(note_a) + lock_note(note_b)\n" +
+          "  (12b) Ed25519 verify + tee_forced_settle\n" +
+          "Privacy is unaffected — lock_note only references note " +
+          "commitments already public on L1 (from deposit) and amounts " +
+          "already public on L1 (from deposit). No order intent is " +
+          "exposed by either tx.",
+        );
+        const lockTx = new Transaction().add(
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+          buildLockNoteInstruction({
+            programId: vaultProgramId,
+            teeAuthority: teeKeypair.publicKey,
+            noteCommitment: alice.depositNote!.commitment,
+            orderId: aliceOrderId,
+            expirySlot: expiry,
+            amount: ALICE_DEPOSIT,
+          }),
+          buildLockNoteInstruction({
+            programId: vaultProgramId,
+            teeAuthority: teeKeypair.publicKey,
+            noteCommitment: bob.depositNote!.commitment,
+            orderId: bobOrderId,
+            expirySlot: expiry,
+            amount: BOB_DEPOSIT,
+          }),
+        );
+        const lockSig = await sendAndConfirmTransaction(
+          l1, lockTx, [teeKeypair], { commitment: "confirmed" },
+        );
+        txline("lock_note(note_a) + lock_note(note_b)", lockSig);
+
         const settleTx = new Transaction().add(
           ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
           buildEd25519VerifyIx({
@@ -699,7 +796,7 @@ maybeDescribe(
         const settleSig = await sendAndConfirmTransaction(
           l1, settleTx, [teeKeypair], { commitment: "confirmed" },
         );
-        txline("tee_forced_settle — appends note_c/d + fee, consumes nulls", settleSig);
+        txline("Ed25519 + tee_forced_settle", settleSig);
 
         await tree.append(noteCcommitment);
         alice.tradeNote = {

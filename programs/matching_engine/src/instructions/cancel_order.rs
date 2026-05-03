@@ -1,69 +1,83 @@
-//! `cancel_order` — user removes their own OrderRecord from the CLOB.
+//! `cancel_order` — user resets their own pending PendingOrder slot.
 //!
-//! Signer = Trading Key (the same key that signed `submit_order`). We look
-//! up the OrderRecord by `(trading_key, order_id)` and flip its status to
-//! CANCELLED. The L1 NoteLock stays in place until the natural
-//! `expiry_slot` — `vault::release_lock` can only release after expiry by
-//! design (see vault/src/instructions/release_lock.rs). That's deliberate:
-//! allowing pre-expiry release from inside the PER would require a TEE
-//! signature on the release path, which is Phase-5 territory.
+//! Privacy: like `submit_order`, this runs INSIDE the ER. The L1 sees no
+//! cancellation event because the slot is delegated and only the slot's
+//! status flag changes — there is no L1 transaction.
 //!
-//! Phase 4 scope:
-//!   - Flip status to CANCELLED in the CLOB.
-//!   - Decrement order_count.
-//!   - Emit OrderCancelled event so off-chain watchers can update their view.
+//! The slot must be Pending. After cancel, the slot becomes Empty and
+//! the user can immediately submit a new order through the same slot
+//! without paying re-allocation rent.
 
 use anchor_lang::prelude::*;
 
 use crate::errors::MatchingError;
-use crate::state::{DarkCLOB, ORDER_STATUS_ACTIVE, ORDER_STATUS_CANCELLED};
+use crate::state::{
+    PendingOrder, PENDING_STATUS_CANCELLED, PENDING_STATUS_PENDING,
+};
 
 #[derive(Accounts)]
-#[instruction(market: Pubkey, order_id: [u8; 16])]
+#[instruction(market: Pubkey, slot_idx: u8)]
 pub struct CancelOrder<'info> {
     #[account(mut)]
     pub trading_key: Signer<'info>,
 
     #[account(
         mut,
-        seeds = [DarkCLOB::SEED, market.as_ref()],
-        bump = dark_clob.load()?.bump,
+        seeds = [
+            PendingOrder::SEED,
+            market.as_ref(),
+            trading_key.key().as_ref(),
+            core::slice::from_ref(&slot_idx),
+        ],
+        bump = pending_order.load()?.bump,
     )]
-    pub dark_clob: AccountLoader<'info, DarkCLOB>,
+    pub pending_order: AccountLoader<'info, PendingOrder>,
 }
 
 pub fn cancel_order_handler(
     ctx: Context<CancelOrder>,
     market: Pubkey,
-    order_id: [u8; 16],
+    slot_idx: u8,
 ) -> Result<()> {
+    let order_id;
     {
-        let clob = ctx.accounts.dark_clob.load()?;
-        require!(clob.market == market, MatchingError::MarketMismatch);
-    }
-
-    let mut clob = ctx.accounts.dark_clob.load_mut()?;
-    let slot = clob
-        .find_by_order_id(&ctx.accounts.trading_key.key(), &order_id)
-        .ok_or(MatchingError::OrderNotFound)?;
-
-    let seq_no;
-    {
-        let o = &mut clob.orders[slot];
+        let slot = ctx.accounts.pending_order.load()?;
         require!(
-            o.status == ORDER_STATUS_ACTIVE,
+            slot.trading_key == ctx.accounts.trading_key.key(),
+            MatchingError::UnauthorizedTradingKey
+        );
+        require!(slot.market == market, MatchingError::MarketMismatch);
+        require!(
+            slot.slot_idx == slot_idx,
+            MatchingError::InvalidPendingSlot
+        );
+        require!(
+            slot.status == PENDING_STATUS_PENDING,
             MatchingError::OrderNotFound
         );
-        o.status = ORDER_STATUS_CANCELLED;
-        seq_no = o.seq_no;
+        order_id = slot.order_id;
     }
-    clob.order_count = clob.order_count.saturating_sub(1);
+
+    {
+        let mut slot = ctx.accounts.pending_order.load_mut()?;
+        slot.status = PENDING_STATUS_CANCELLED;
+        // Wipe the order intent fields so a stale snapshot can't leak
+        // anything. Identity (trading_key / market / slot_idx / bump) is
+        // preserved so the next submit_order can reuse the slot.
+        slot.amount = 0;
+        slot.price_limit = 0;
+        slot.note_amount = 0;
+        slot.min_fill_qty = 0;
+        slot.collateral_note = [0u8; 32];
+        slot.user_commitment = [0u8; 32];
+        slot.order_id = [0u8; 16];
+    }
 
     emit!(OrderCancelled {
         market,
         trading_key: ctx.accounts.trading_key.key(),
+        slot_idx,
         order_id,
-        seq_no,
     });
     Ok(())
 }
@@ -72,6 +86,6 @@ pub fn cancel_order_handler(
 pub struct OrderCancelled {
     pub market: Pubkey,
     pub trading_key: Pubkey,
+    pub slot_idx: u8,
     pub order_id: [u8; 16],
-    pub seq_no: u64,
 }

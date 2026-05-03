@@ -1,13 +1,22 @@
 /**
- * getOrderSubmitFunction — factory pattern per spec §23.3.2.
+ * getOrderSubmitFunction — privacy-fix submit_order pipeline.
  *
- * Staged pipeline (each stage throws a DarkPoolError with its own `stage` tag):
- *   1. "attestation-verify"  — non-retryable. If TEE quote fails, abort.
- *   2. "auth-token-fetch"    — fetch/refresh JWT via PER session manager.
- *   3. "note-lock-check"     — note must not be locked/consumed.
- *   4. "instruction-build"   — pure local; caller-supplied params validated.
- *   5. "transaction-send"    — POST signed tx over PER RPC. On 401 → refresh
- *                              once and retry (via session manager).
+ * Submit an order INSIDE the MagicBlock Ephemeral Rollup. The order's
+ * `side`, `amount`, `price_limit`, `note_commitment` and `user_commitment`
+ * never appear in any L1 log — they live and die inside the TEE unless
+ * the order matches in `run_batch`.
+ *
+ * Pre-condition: the user's `PendingOrder` slot at `(market, slotIdx)` must
+ * already be created on L1 (`init_pending_order_slot`) AND delegated to
+ * the ER (`delegate_pending_order`) before this function is called.
+ *
+ * Stages (each throws DarkPoolError with its own `stage` tag):
+ *   1. "parameter"           — synchronous arg validation.
+ *   2. "attestation-verify"  — non-retryable PER attestation check.
+ *   3. "auth-token-fetch"    — fetch/refresh JWT.
+ *   4. "instruction-build"   — pure local; ix targets the delegated slot.
+ *   5. "transaction-send"    — POST signed tx via PER session manager
+ *                              (which routes to the ER RPC, NOT L1).
  */
 
 import type { PublicKey, TransactionSignature } from "@solana/web3.js";
@@ -17,6 +26,7 @@ import { DarkPoolError } from "../errors.js";
 import type { IPerSessionManager } from "../per/session-manager.js";
 import {
   buildSubmitOrderInstruction,
+  MAX_PENDING_SLOTS_PER_USER,
   OrderType,
   type SubmitOrderIxAndKeys,
 } from "../idl/matching-engine-client.js";
@@ -31,11 +41,11 @@ export interface OrderParams {
   tradingKey: PublicKey;
   /** The market this order belongs to. */
   market: PublicKey;
-  /** TEE authority pubkey (must equal `vault_config.tee_pubkey`). */
-  teeAuthority: PublicKey;
-  /** User commitment this trading key is tied to (for walletEntry PDA). */
+  /** Slot index (0..MAX_PENDING_SLOTS_PER_USER) — must be pre-allocated + delegated. */
+  slotIdx: number;
+  /** User commitment this trading key is tied to. */
   userCommitment: Uint8Array;
-  /** 32-byte commitment of the note being locked as collateral. */
+  /** 32-byte commitment of the note being collateralised. */
   noteCommitment: Uint8Array;
   /** Amount (base units) of the token the user wants to trade. */
   amount: bigint;
@@ -44,7 +54,7 @@ export interface OrderParams {
   side: OrderSide;
   /** Value encoded in the note. Caller-supplied ceiling for notional check. */
   noteAmount: bigint;
-  /** Slot at which the lock auto-expires. */
+  /** Slot at which the order auto-expires. */
   expirySlot: bigint;
   /** 16-byte random order id. */
   orderId: Uint8Array;
@@ -63,9 +73,7 @@ const ORDER_TYPE_BY_NAME: Record<OrderTypeName, OrderType> = {
 
 export interface OrderReceipt {
   signature: TransactionSignature;
-  orderInclusionCommitment: Uint8Array;
-  darkClobPda: PublicKey;
-  noteLockPda: PublicKey;
+  pendingOrderPda: PublicKey;
 }
 
 export interface OrderSubmitDeps {
@@ -103,6 +111,15 @@ export function getOrderSubmitFunction(
     if (params.priceLimit <= 0n) {
       throw new DarkPoolError("parameter", "priceLimit must be > 0");
     }
+    if (
+      params.slotIdx < 0 ||
+      params.slotIdx >= MAX_PENDING_SLOTS_PER_USER
+    ) {
+      throw new DarkPoolError(
+        "parameter",
+        `slotIdx must be in [0, ${MAX_PENDING_SLOTS_PER_USER})`,
+      );
+    }
     const notional = params.amount * params.priceLimit;
     if (notional > params.noteAmount) {
       throw new DarkPoolError(
@@ -139,33 +156,14 @@ export function getOrderSubmitFunction(
       );
     }
 
-    // ----- Stage 3: note-lock-check -----
-    const noteInfo = await client.getNoteStatus(params.noteCommitment);
-    if (noteInfo.status === "locked") {
-      throw new DarkPoolError(
-        "note-lock-check",
-        "note is already locked by another active order",
-      );
-    }
-    if (noteInfo.status === "consumed") {
-      throw new DarkPoolError(
-        "note-lock-check",
-        "note has been consumed by a prior settlement",
-      );
-    }
-    if (noteInfo.status === "unknown") {
-      throw new DarkPoolError("note-lock-check", "note status unknown");
-    }
-
-    // ----- Stage 4: instruction-build -----
+    // ----- Stage 3: instruction-build -----
     let built: SubmitOrderIxAndKeys;
     try {
       built = buildSubmitOrderInstruction({
         programId: meProgramId,
-        vaultProgramId: client.programId,
         tradingKey: params.tradingKey,
-        teeAuthority: params.teeAuthority,
         market: params.market,
+        slotIdx: params.slotIdx,
         userCommitment: params.userCommitment,
         noteCommitment: params.noteCommitment,
         amount: params.amount,
@@ -184,7 +182,7 @@ export function getOrderSubmitFunction(
       );
     }
 
-    // ----- Stage 5: transaction-send (with one 401 refresh retry) -----
+    // ----- Stage 4: transaction-send (with one 401 refresh retry) -----
     const ctx = { traderPubkey: params.tradingKey.toBytes() };
     let signature: TransactionSignature;
     try {
@@ -195,7 +193,6 @@ export function getOrderSubmitFunction(
       );
     } catch (err) {
       if (err instanceof DarkPoolError && err.stage === "auth-token-fetch") {
-        // JWT expired mid-flight. Refresh once and retry.
         const jwt2 = await deps.perSessionManager.getToken();
         signature = await deps.perSessionManager.sendInstruction(
           built.ix,
@@ -212,40 +209,9 @@ export function getOrderSubmitFunction(
       }
     }
 
-    // The TEE returns the `order_inclusion_commitment` via the tx's emit!ed
-    // event. For Phase 3 the SDK does not parse the response stream; callers
-    // can subscribe to logs to pick up the commitment. We compute a *local*
-    // placeholder here and leave the authoritative value to the event.
-    const orderInclusionCommitment = hashInclusionCommitmentPlaceholder(
-      params.noteCommitment,
-      params.tradingKey.toBytes(),
-    );
-
     return {
       signature,
-      orderInclusionCommitment,
-      darkClobPda: built.darkClobPda,
-      noteLockPda: built.noteLockPda,
+      pendingOrderPda: built.pendingOrderPda,
     };
   };
-}
-
-// Placeholder inclusion-commitment hash: we don't know seq_no locally, so we
-// return H(note_commitment || trading_key). The authoritative commitment that
-// matches on-chain uses seq_no and is returned by the TEE in the event log.
-function hashInclusionCommitmentPlaceholder(
-  noteCommitment: Uint8Array,
-  tradingKey: Uint8Array,
-): Uint8Array {
-  const buf = new Uint8Array(32 + 32);
-  buf.set(noteCommitment, 0);
-  buf.set(tradingKey, 32);
-  // Use a web-crypto compatible synchronous hash via SubtleCrypto is async;
-  // for a sync placeholder we xor-fold into 32 bytes. This is only a
-  // placeholder — tests check the on-chain event for the real commitment.
-  const out = new Uint8Array(32);
-  for (let i = 0; i < buf.length; i++) {
-    out[i % 32] ^= buf[i];
-  }
-  return out;
 }
