@@ -608,7 +608,14 @@ maybeDescribe(
             tradingKey: p.tradingKey.publicKey,
             market,
             slotIdx,
-            userCommitment: p.userCommitment,
+            // PendingOrder.user_commitment is documented (see
+            // programs/matching_engine/src/instructions/submit_order.rs) as
+            // Poseidon(spending_key, r_owner) — the OWNER commitment used
+            // by VALID_SPEND, NOT the wallet/user commitment from
+            // userCommitmentFromKeys. Wrong here only matters when a
+            // change note is later spent (see change-note-flow.test.ts),
+            // but use the correct value to avoid bit-rot.
+            userCommitment: bn254ToBE32(p.ownerCommit),
             noteCommitment: p.depositNote!.commitment,
             amount, priceLimit, side,
             noteAmount: p.depositNote!.amount,

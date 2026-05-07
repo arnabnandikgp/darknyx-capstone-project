@@ -19,6 +19,7 @@ Organisation:
 - §9  Devnet — deploy + environment + constants
 - §10 Devnet E2E — L1-only happy-path (setup + trade flow)
 - §11 Devnet E2E — ER (MagicBlock Ephemeral Rollup) cycle
+- §11A Devnet E2E — change-note + partial-fill scenarios
 - §12 Troubleshooting common failures
 
 ---
@@ -486,6 +487,97 @@ against the same devnet vault (after a setup wipe) without
    un-delegation if a user wants to release their slots back to L1
    (e.g. to refund rent). Add `undelegate_pending_order` once the UX
    needs it.
+
+---
+
+## 11A. Devnet E2E — change-note + partial-fill scenarios
+
+`packages/sdk/tests/change-note-flow.test.ts` covers two flows that the
+happy-path `er-trade-flow.test.ts` doesn't exercise. Each test runs the
+full pipeline (deposit → init+delegate slots → submit_order → run_batch
+→ undelegate_market → lock_note → settle → withdraw) on devnet against
+the same programs as §11 and prints a wall-clock timing summary at the
+end.
+
+### 11A.1 What each scenario proves
+
+| Test | Setup                                                                 | What it asserts                                                                                                                    |
+|------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| A    | Alice deposits 5000 QUOTE; BUYs 30 BASE @ 100. Bob deposits/SELLs 30 BASE. | `BatchResults.buyer_change_amt = 1991`, recomputed `note_e` matches on-chain commitment, Alice withdraws BOTH `note_c` (BASE 30) and `note_e` (QUOTE 1991) — i.e. change notes are first-class spendable notes. |
+| B    | Alice BUYs 100 @ 100 with 10030 QUOTE deposit. Bob SELLs 30 BASE.     | `BatchResults.buyer_relock_order_id == aliceOrderId`, the L1 `NoteLock(note_e)` PDA pins 7021 QUOTE to Alice's order, the ER-resident `PendingOrder` slot rotates to `{status: Pending, amount: 70, note_amount: 7021, collateral_note: note_e}`, Bob withdraws his matched `note_d` (3000 QUOTE). |
+
+Test A uses `(Alice slot 0, Bob slot 0)` and Test B uses
+`(Alice slot 1, Bob slot 1)` so they don't collide if you run both
+back-to-back without resetting the tree. Both tests use
+`alice-cn-*` / `bob-cn-*` keypairs so they don't collide with the
+ER happy-path test (`alice-er-*` / `bob-er-*`).
+
+### 11A.2 Prerequisites
+
+Same as §11.1, plus a fresh tree — i.e. always run `devnet-setup.test.ts`
+first (or whenever the shadow tree drifts):
+
+```sh
+RUN_DEVNET_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-setup.test.ts )
+```
+
+### 11A.3 Run both scenarios
+
+```sh
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts )
+```
+
+### 11A.4 Run a single scenario
+
+Vitest matches by `it()` name with `-t`:
+
+```sh
+# Test A only — over-collateralised exact fill
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts -t "over-collateralised" )
+
+# Test B only — partial fill with re-lock
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts -t "partial fill" )
+```
+
+### 11A.5 Reading the timing summary
+
+Each scenario prints a per-step duration table after the assertions
+pass:
+
+```
+══════════════════════════════════════════════════════════════════════════════
+  TIMING SUMMARY — over-collateralised exact fill
+══════════════════════════════════════════════════════════════════════════════
+   step                                                       duration    cluster
+   ──────────────────────────────────────────────────────────────────────────
+   1.   derive Alice persona                                       0.01 s     local
+   2.   fund SOL top-ups                                           1.34 s     L1
+   ...
+   N.   VALID_SPEND + withdraw note_e (CHANGE)                     2.21 s     L1
+   ──────────────────────────────────────────────────────────────────────────
+   TOTAL (cold start → user can withdraw)                         62.40 s
+   submit_order accepted → withdraw confirmed                     34.10 s
+══════════════════════════════════════════════════════════════════════════════
+```
+
+The two derived metrics at the bottom let you compare runs across
+network conditions without eyeballing the per-row table.
 
 ---
 
