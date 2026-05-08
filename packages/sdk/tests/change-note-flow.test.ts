@@ -36,6 +36,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 import { config as dotenvConfig } from "dotenv";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -73,6 +74,7 @@ import {
   buildCreateWalletInstruction,
   buildDepositInstruction,
   buildLockNoteInstruction,
+  buildSetProtocolConfigInstruction,
   buildResetMerkleTreeInstruction,
   buildWithdrawInstruction,
   noteLockPda,
@@ -1592,6 +1594,747 @@ maybeDescribe(
         expect(BigInt(bQuoteBal.value.amount)).toBeGreaterThanOrEqual(MATCHED_QUOTE);
 
         timer.printSummary("partial fill with re-lock");
+      },
+    );
+
+    it(
+      "C: privacy regression — ER submit_order leaves no order-intent bytes on L1",
+      { timeout: 900_000 },
+      async () => {
+        const timer = new StepTimer();
+        banner("TEST C — privacy regression (ER submit_order leaves no L1 order bytes)");
+
+        const ALICE_DEPOSIT = 2_000n;
+        const PRICE = 100n;
+        const AMOUNT = 10n;
+
+        step(0, "reset_merkle_tree (per-test fresh tree)");
+        await timer.time("reset_merkle_tree", "L1", () => resetTreeFresh(fx));
+
+        const runSeed = freshRunSeed();
+        const alice = await timer.time("derive Alice persona", "local", () => makePersona("alice", 0xD1, runSeed));
+        const bob = await timer.time("derive Bob persona", "local", () => makePersona("bob", 0xD2, runSeed));
+
+        step(1, "fund + mint + wallet + deposit");
+        const atas = await fundAndMint(fx, alice, bob, ALICE_DEPOSIT, 1n, timer);
+        await ensureWallets(fx, alice, bob, timer);
+        await timer.time("deposit Alice note", "L1", async () => {
+          await depositNote(fx, alice, fx.quoteMint, ALICE_DEPOSIT, atas.aliceQuoteAta);
+        });
+
+        step(2, "init + delegate Alice PendingOrder slot");
+        const ALICE_SLOT = 0;
+        const aliceSlotPda = await timer.time("delegate Alice slot", "L1", async () =>
+          ensureSlot(fx, alice, ALICE_SLOT),
+        );
+
+        const l1Before = await fx.l1.getAccountInfo(aliceSlotPda, "confirmed");
+        if (!l1Before) throw new Error("L1 PendingOrder slot missing before submit");
+        const l1BeforeOwner = l1Before.owner.toBase58();
+        const l1BeforeHash = createHash("sha256")
+          .update(l1Before.data)
+          .digest("hex");
+        const sigsBefore = await fx.l1.getSignaturesForAddress(
+          alice.tradingKey.publicKey,
+          { limit: 20 },
+          "confirmed",
+        );
+
+        step(3, "submit_order via ER");
+        const orderId = alice.tradingKey.publicKey.toBytes().slice(0, 16);
+        orderId[0] |= 0x80;
+        const now = await fx.l1.getSlot("confirmed");
+        const expiry = BigInt(now) + 500n;
+        await timer.time("submit_order Alice (ER)", "ER", async () => {
+          const { ix } = buildSubmitOrderInstruction({
+            programId: fx.meProgramId,
+            tradingKey: alice.tradingKey.publicKey,
+            market: fx.market,
+            slotIdx: ALICE_SLOT,
+            userCommitment: bn254ToBE32(alice.ownerCommit),
+            noteCommitment: alice.depositNote!.commitment,
+            amount: AMOUNT,
+            priceLimit: PRICE,
+            side: 0,
+            noteAmount: alice.depositNote!.amount,
+            expirySlot: expiry,
+            orderId,
+            orderType: OrderType.Limit,
+          });
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            ix,
+          );
+          const sig = await sendAndConfirmTransaction(
+            fx.er, tx, [alice.tradingKey], { commitment: "confirmed" },
+          );
+          txline("alice: submit_order BUY 10 @ 100", sig, "er");
+        });
+        timer.markOrderAccepted();
+
+        step(4, "assert privacy: slot bytes unchanged on L1, while ER state changed");
+        const erSlotAcct = await fx.er.getAccountInfo(aliceSlotPda, "confirmed");
+        if (!erSlotAcct) throw new Error("ER PendingOrder slot missing after submit");
+        const erSlot = decodePendingOrder(new Uint8Array(erSlotAcct.data));
+        expect(erSlot.status).toBe(PENDING_STATUS_PENDING);
+        expect(erSlot.amount).toBe(AMOUNT);
+        expect(erSlot.priceLimit).toBe(PRICE);
+
+        const l1After = await fx.l1.getAccountInfo(aliceSlotPda, "confirmed");
+        if (!l1After) throw new Error("L1 PendingOrder slot missing after submit");
+        const l1AfterOwner = l1After.owner.toBase58();
+        const l1AfterHash = createHash("sha256")
+          .update(l1After.data)
+          .digest("hex");
+        const sigsAfter = await fx.l1.getSignaturesForAddress(
+          alice.tradingKey.publicKey,
+          { limit: 20 },
+          "confirmed",
+        );
+
+        expect(l1BeforeOwner).not.toBe(fx.meProgramId.toBase58());
+        expect(l1AfterOwner).toBe(l1BeforeOwner);
+        expect(l1AfterHash).toBe(l1BeforeHash);
+        expect(sigsAfter.map((s) => s.signature)).toEqual(
+          sigsBefore.map((s) => s.signature),
+        );
+
+        timer.printSummary("privacy regression");
+      },
+    );
+
+    it(
+      "D: multi-batch continuation — residual order matches in a second batch",
+      { timeout: 900_000 },
+      async () => {
+        const timer = new StepTimer();
+        banner("TEST D — multi-batch continuation (partial then residual match)");
+
+        const PRICE = 100n;
+        const ALICE_BUY = 100n;
+        const BOB_SELL = 30n;
+        const CAROL_SELL = 70n;
+        const FEE_BPS = BigInt(fx.protocolFeeBps);
+        const ALICE_FULL_NOTIONAL = ALICE_BUY * PRICE; // 10000
+        const ALICE_FULL_FEE = (ALICE_FULL_NOTIONAL * FEE_BPS) / 10_000n; // 30
+        const ALICE_DEPOSIT = ALICE_FULL_NOTIONAL + ALICE_FULL_FEE; // 10030
+        const BOB_DEPOSIT = BOB_SELL;
+        const CAROL_DEPOSIT = CAROL_SELL;
+        const MATCH1_QUOTE = BOB_SELL * PRICE; // 3000
+        const MATCH1_FEE = (MATCH1_QUOTE * FEE_BPS) / 10_000n; // 9
+        const EXPECTED_ALICE_REMAINDER = ALICE_DEPOSIT - MATCH1_QUOTE - MATCH1_FEE; // 7021
+
+        step(0, "reset_merkle_tree (per-test fresh tree)");
+        await timer.time("reset_merkle_tree", "L1", () => resetTreeFresh(fx));
+
+        const runSeed = freshRunSeed();
+        const alice = await timer.time("derive Alice persona", "local", () => makePersona("alice", 0xE1, runSeed));
+        const bob = await timer.time("derive Bob persona", "local", () => makePersona("bob", 0xE2, runSeed));
+        const carol = await timer.time("derive Carol persona", "local", () => makePersona("carol", 0xE3, runSeed));
+
+        step(1, "fund + mint for Alice/Bob/Carol");
+        const PAYER_LAMPORTS = 2_000_000_000, PAYER_MIN = 500_000_000;
+        const TK_LAMPORTS = 100_000_000, TK_MIN = 20_000_000;
+        type FT = { label: string; to: PublicKey; target: number; min: number };
+        const targets: FT[] = [
+          { label: "alice payer",   to: alice.payer.publicKey,      target: PAYER_LAMPORTS, min: PAYER_MIN },
+          { label: "bob payer",     to: bob.payer.publicKey,        target: PAYER_LAMPORTS, min: PAYER_MIN },
+          { label: "carol payer",   to: carol.payer.publicKey,      target: PAYER_LAMPORTS, min: PAYER_MIN },
+          { label: "alice trading", to: alice.tradingKey.publicKey, target: TK_LAMPORTS,    min: TK_MIN },
+          { label: "bob trading",   to: bob.tradingKey.publicKey,   target: TK_LAMPORTS,    min: TK_MIN },
+          { label: "carol trading", to: carol.tradingKey.publicKey, target: TK_LAMPORTS,    min: TK_MIN },
+        ];
+        const fundIxs = [];
+        for (const t of targets) {
+          const b = await fx.l1.getBalance(t.to);
+          if (b < t.min) {
+            fundIxs.push(
+              SystemProgram.transfer({
+                fromPubkey: fx.funder.publicKey,
+                toPubkey: t.to,
+                lamports: t.target - b,
+              }),
+            );
+          }
+        }
+        if (fundIxs.length > 0) {
+          await timer.time("fund SOL top-ups", "L1", async () => {
+            const sig = await sendAndConfirmTransaction(
+              fx.l1,
+              new Transaction().add(...fundIxs),
+              [fx.funder],
+              { commitment: "confirmed" },
+            );
+            txline("funded Alice/Bob/Carol", sig);
+          });
+        }
+
+        const aliceQuoteAta = await getAssociatedTokenAddress(fx.quoteMint, alice.payer.publicKey);
+        const bobBaseAta = await getAssociatedTokenAddress(fx.baseMint, bob.payer.publicKey);
+        const carolBaseAta = await getAssociatedTokenAddress(fx.baseMint, carol.payer.publicKey);
+        await timer.time("create ATAs + mint balances", "L1", async () => {
+          const tx = new Transaction().add(
+            createAssociatedTokenAccountIdempotentInstruction(fx.admin.publicKey, aliceQuoteAta, alice.payer.publicKey, fx.quoteMint),
+            createAssociatedTokenAccountIdempotentInstruction(fx.admin.publicKey, bobBaseAta, bob.payer.publicKey, fx.baseMint),
+            createAssociatedTokenAccountIdempotentInstruction(fx.admin.publicKey, carolBaseAta, carol.payer.publicKey, fx.baseMint),
+            createMintToInstruction(fx.quoteMint, aliceQuoteAta, fx.admin.publicKey, Number(ALICE_DEPOSIT)),
+            createMintToInstruction(fx.baseMint, bobBaseAta, fx.admin.publicKey, Number(BOB_DEPOSIT)),
+            createMintToInstruction(fx.baseMint, carolBaseAta, fx.admin.publicKey, Number(CAROL_DEPOSIT)),
+          );
+          const sig = await sendAndConfirmTransaction(fx.l1, tx, [fx.admin], { commitment: "confirmed" });
+          txline("minted deposits for all personas", sig);
+        });
+
+        step(2, "create_wallet for Alice/Bob/Carol");
+        await timer.time("create_wallet ×3", "L1", async () => {
+          for (const p of [alice, bob, carol]) {
+            const [wpda] = walletEntryPda(fx.vaultProgramId, p.userCommitment);
+            const ex = await fx.l1.getAccountInfo(wpda);
+            if (ex) continue;
+            const [ucLo, ucHi] = pubkeyToFrPair(p.payer.publicKey.toBytes());
+            const { proof } = snarkjsFullProve(
+              {
+                userCommitment: be32ToDec(p.userCommitment),
+                rootKey: [ucLo.toString(), ucHi.toString()],
+                spendingKey: p.spendingKey.toString(),
+                viewingKey: p.viewingKey.toString(),
+                r0: p.r0.toString(), r1: p.r1.toString(), r2: p.r2.toString(),
+              },
+              { circuitWasmPath: CREATE_WASM, circuitZkeyPath: CREATE_ZKEY, repoRoot: REPO_ROOT },
+            );
+            const tx = new Transaction().add(
+              buildCreateWalletInstruction({
+                programId: fx.vaultProgramId,
+                owner: p.payer.publicKey,
+                commitment: p.userCommitment,
+                proof,
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(fx.l1, tx, [p.payer], { commitment: "confirmed" });
+            txline(`${p.name}: create_wallet`, sig);
+          }
+        });
+
+        step(3, "deposit notes for all personas");
+        await timer.time("deposit ×3", "L1", async () => {
+          await depositNote(fx, alice, fx.quoteMint, ALICE_DEPOSIT, aliceQuoteAta);
+          await depositNote(fx, bob, fx.baseMint, BOB_DEPOSIT, bobBaseAta);
+          await depositNote(fx, carol, fx.baseMint, CAROL_DEPOSIT, carolBaseAta);
+        });
+
+        step(4, "init + delegate pending slots and market PDAs");
+        const SLOT = 1;
+        const aliceSlotPda = await ensureSlot(fx, alice, SLOT);
+        const bobSlotPda = await ensureSlot(fx, bob, SLOT);
+        const carolSlotPda = await ensureSlot(fx, carol, SLOT);
+        await ensureMarketDelegated(fx);
+
+        const aliceOrderId = alice.tradingKey.publicKey.toBytes().slice(0, 16);
+        aliceOrderId[0] |= 0x80;
+        const bobOrderId = bob.tradingKey.publicKey.toBytes().slice(0, 16);
+        bobOrderId[0] |= 0x80;
+        const carolOrderId = carol.tradingKey.publicKey.toBytes().slice(0, 16);
+        carolOrderId[0] |= 0x80;
+        const now = await fx.l1.getSlot("confirmed");
+        const expiry = BigInt(now) + 600n;
+
+        step(5, "batch 1 — submit Alice BUY 100 and Bob SELL 30, then run_batch");
+        await timer.time("submit_order Alice/Bob", "ER", async () => {
+          const a = buildSubmitOrderInstruction({
+            programId: fx.meProgramId,
+            tradingKey: alice.tradingKey.publicKey,
+            market: fx.market,
+            slotIdx: SLOT,
+            userCommitment: bn254ToBE32(alice.ownerCommit),
+            noteCommitment: alice.depositNote!.commitment,
+            amount: ALICE_BUY,
+            priceLimit: PRICE,
+            side: 0,
+            noteAmount: alice.depositNote!.amount,
+            expirySlot: expiry,
+            orderId: aliceOrderId,
+            orderType: OrderType.Limit,
+          });
+          const b = buildSubmitOrderInstruction({
+            programId: fx.meProgramId,
+            tradingKey: bob.tradingKey.publicKey,
+            market: fx.market,
+            slotIdx: SLOT,
+            userCommitment: bn254ToBE32(bob.ownerCommit),
+            noteCommitment: bob.depositNote!.commitment,
+            amount: BOB_SELL,
+            priceLimit: PRICE,
+            side: 1,
+            noteAmount: bob.depositNote!.amount,
+            expirySlot: expiry,
+            orderId: bobOrderId,
+            orderType: OrderType.Limit,
+          });
+          const txA = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            a.ix,
+          );
+          const sigA = await sendAndConfirmTransaction(
+            fx.er, txA, [alice.tradingKey], { commitment: "confirmed" },
+          );
+          txline("alice: submit_order BUY 100 @ 100", sigA, "er");
+          const txB = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            b.ix,
+          );
+          const sigB = await sendAndConfirmTransaction(
+            fx.er, txB, [bob.tradingKey], { commitment: "confirmed" },
+          );
+          txline("bob: submit_order SELL 30 @ 100", sigB, "er");
+        });
+        timer.markOrderAccepted();
+
+        await timer.time("run_batch #1", "ER", async () => {
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            buildRunBatchInstruction({
+              programId: fx.meProgramId,
+              vaultProgramId: fx.vaultProgramId,
+              teeAuthority: fx.teeKeypair.publicKey,
+              market: fx.market,
+              pythAccount: fx.pythAccount,
+              pendingOrderPdas: [aliceSlotPda, bobSlotPda, carolSlotPda],
+            }),
+          );
+          const sig = await sendAndConfirmTransaction(
+            fx.er, tx, [fx.teeKeypair], { commitment: "confirmed" },
+          );
+          txline("run_batch #1", sig, "er");
+        });
+
+        const aliceAfterBatch1Acct = await fx.er.getAccountInfo(aliceSlotPda, "confirmed");
+        if (!aliceAfterBatch1Acct) throw new Error("Alice slot missing after batch 1");
+        const aliceAfterBatch1 = decodePendingOrder(new Uint8Array(aliceAfterBatch1Acct.data));
+        expect(aliceAfterBatch1.status).toBe(PENDING_STATUS_PENDING);
+        expect(aliceAfterBatch1.amount).toBe(ALICE_BUY - BOB_SELL);
+        expect(aliceAfterBatch1.noteAmount).toBe(EXPECTED_ALICE_REMAINDER);
+        expect(
+          Buffer.from(aliceAfterBatch1.collateralNote).equals(
+            Buffer.from(alice.depositNote!.commitment),
+          ),
+        ).toBe(false);
+
+        step(6, "batch 2 — submit Carol SELL 70 and run_batch again");
+        await timer.time("submit_order Carol", "ER", async () => {
+          const c = buildSubmitOrderInstruction({
+            programId: fx.meProgramId,
+            tradingKey: carol.tradingKey.publicKey,
+            market: fx.market,
+            slotIdx: SLOT,
+            userCommitment: bn254ToBE32(carol.ownerCommit),
+            noteCommitment: carol.depositNote!.commitment,
+            amount: CAROL_SELL,
+            priceLimit: PRICE,
+            side: 1,
+            noteAmount: carol.depositNote!.amount,
+            expirySlot: expiry,
+            orderId: carolOrderId,
+            orderType: OrderType.Limit,
+          });
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            c.ix,
+          );
+          const sig = await sendAndConfirmTransaction(
+            fx.er, tx, [carol.tradingKey], { commitment: "confirmed" },
+          );
+          txline("carol: submit_order SELL 70 @ 100", sig, "er");
+        });
+
+        await timer.time("run_batch #2", "ER", async () => {
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            buildRunBatchInstruction({
+              programId: fx.meProgramId,
+              vaultProgramId: fx.vaultProgramId,
+              teeAuthority: fx.teeKeypair.publicKey,
+              market: fx.market,
+              pythAccount: fx.pythAccount,
+              pendingOrderPdas: [aliceSlotPda, bobSlotPda, carolSlotPda],
+            }),
+          );
+          const sig = await sendAndConfirmTransaction(
+            fx.er, tx, [fx.teeKeypair], { commitment: "confirmed" },
+          );
+          txline("run_batch #2", sig, "er");
+        });
+
+        const aliceAfterBatch2Acct = await fx.er.getAccountInfo(aliceSlotPda, "confirmed");
+        const carolAfterBatch2Acct = await fx.er.getAccountInfo(carolSlotPda, "confirmed");
+        if (!aliceAfterBatch2Acct || !carolAfterBatch2Acct) {
+          throw new Error("slot account missing after batch 2");
+        }
+        const aliceAfterBatch2 = decodePendingOrder(new Uint8Array(aliceAfterBatch2Acct.data));
+        const carolAfterBatch2 = decodePendingOrder(new Uint8Array(carolAfterBatch2Acct.data));
+        expect(aliceAfterBatch2.status).toBe(PENDING_STATUS_MATCHED);
+        expect(aliceAfterBatch2.amount).toBe(0n);
+        expect(carolAfterBatch2.status).toBe(PENDING_STATUS_MATCHED);
+        expect(carolAfterBatch2.amount).toBe(0n);
+
+        await timer.time("undelegate_market cleanup", "ER", async () => {
+          const tx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            buildUndelegateMarketInstruction({
+              programId: fx.meProgramId,
+              payer: fx.funder.publicKey,
+              market: fx.market,
+            }),
+          );
+          const sig = await sendAndConfirmTransaction(
+            fx.er, tx, [fx.funder], { commitment: "confirmed" },
+          );
+          txline("undelegate_market", sig, "er");
+        });
+
+        timer.printSummary("multi-batch continuation");
+      },
+    );
+
+    it(
+      "E: real protocol-owner fee withdrawal E2E",
+      { timeout: 900_000 },
+      async () => {
+        const timer = new StepTimer();
+        banner("TEST E — real protocol-owner fee withdrawal");
+
+        const PRICE = 100n;
+        const BASE_AMT = 50n;
+        const QUOTE_AMT = BASE_AMT * PRICE; // 5000
+        const BUYER_FEE = (QUOTE_AMT * BigInt(fx.protocolFeeBps)) / 10_000n; // 15
+        const SELLER_FEE = (BASE_AMT * BigInt(fx.protocolFeeBps)) / 10_000n; // 0
+        const ALICE_DEPOSIT = QUOTE_AMT + BUYER_FEE; // 5015
+        const BOB_DEPOSIT = BASE_AMT + SELLER_FEE;   // 50
+
+        const previousProtocolCommitment = new Uint8Array(fx.protocolOwnerCommitment);
+        const runSeed = freshRunSeed();
+        const alice = await timer.time("derive Alice persona", "local", () => makePersona("alice", 0xF1, runSeed));
+        const bob = await timer.time("derive Bob persona", "local", () => makePersona("bob", 0xF2, runSeed));
+        const protocol = await timer.time("derive protocol-owner persona", "local", () => makePersona("protocol", 0xF3, runSeed));
+        const protocolCommitment = bn254ToBE32(protocol.ownerCommit);
+        const protocolQuoteAta = await getAssociatedTokenAddress(
+          fx.quoteMint,
+          protocol.payer.publicKey,
+        );
+
+        try {
+          step(0, "reset_merkle_tree + set real protocol_owner_commitment");
+          await timer.time("reset_merkle_tree", "L1", () => resetTreeFresh(fx));
+          await timer.time("set_protocol_config(real owner commitment)", "L1", async () => {
+            const tx = new Transaction().add(
+              buildSetProtocolConfigInstruction({
+                programId: fx.vaultProgramId,
+                admin: fx.admin.publicKey,
+                protocolOwnerCommitment: protocolCommitment,
+                feeRateBps: fx.protocolFeeBps,
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.l1, tx, [fx.admin], { commitment: "confirmed" },
+            );
+            txline("set_protocol_config(real protocol owner)", sig);
+            fx.protocolOwnerCommitment = protocolCommitment;
+          });
+
+          step(1, "fund + mint + create protocol fee ATA");
+          const atas = await fundAndMint(fx, alice, bob, ALICE_DEPOSIT, BOB_DEPOSIT, timer);
+          const protocolBal = await fx.l1.getBalance(protocol.payer.publicKey);
+          if (protocolBal < 500_000_000) {
+            await timer.time("fund protocol payer", "L1", async () => {
+              const sig = await sendAndConfirmTransaction(
+                fx.l1,
+                new Transaction().add(
+                  SystemProgram.transfer({
+                    fromPubkey: fx.funder.publicKey,
+                    toPubkey: protocol.payer.publicKey,
+                    lamports: 1_000_000_000 - protocolBal,
+                  }),
+                ),
+                [fx.funder],
+                { commitment: "confirmed" },
+              );
+              txline("funded protocol payer", sig);
+            });
+          }
+          await timer.time("create protocol quote ATA", "L1", async () => {
+            const tx = new Transaction().add(
+              createAssociatedTokenAccountIdempotentInstruction(
+                fx.admin.publicKey,
+                protocolQuoteAta,
+                protocol.payer.publicKey,
+                fx.quoteMint,
+              ),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.l1, tx, [fx.admin], { commitment: "confirmed" },
+            );
+            txline("created protocol quote ATA", sig);
+          });
+
+          step(2, "create_wallet + deposit + delegate slots/market");
+          await ensureWallets(fx, alice, bob, timer);
+          await timer.time("deposit ×2", "L1", async () => {
+            await depositNote(fx, alice, fx.quoteMint, ALICE_DEPOSIT, atas.aliceQuoteAta);
+            await depositNote(fx, bob, fx.baseMint, BOB_DEPOSIT, atas.bobBaseAta);
+          });
+          const SLOT = 2;
+          const aliceSlotPda = await ensureSlot(fx, alice, SLOT);
+          const bobSlotPda = await ensureSlot(fx, bob, SLOT);
+          await ensureMarketDelegated(fx);
+
+          step(3, "submit_order ×2 + run_batch");
+          const aliceOrderId = alice.tradingKey.publicKey.toBytes().slice(0, 16);
+          aliceOrderId[0] |= 0x80;
+          const bobOrderId = bob.tradingKey.publicKey.toBytes().slice(0, 16);
+          bobOrderId[0] |= 0x80;
+          const now = await fx.l1.getSlot("confirmed");
+          const expiry = BigInt(now) + 500n;
+
+          await timer.time("submit_order Alice/Bob", "ER", async () => {
+            const a = buildSubmitOrderInstruction({
+              programId: fx.meProgramId,
+              tradingKey: alice.tradingKey.publicKey,
+              market: fx.market,
+              slotIdx: SLOT,
+              userCommitment: bn254ToBE32(alice.ownerCommit),
+              noteCommitment: alice.depositNote!.commitment,
+              amount: BASE_AMT,
+              priceLimit: PRICE,
+              side: 0,
+              noteAmount: alice.depositNote!.amount,
+              expirySlot: expiry,
+              orderId: aliceOrderId,
+              orderType: OrderType.Limit,
+            });
+            const b = buildSubmitOrderInstruction({
+              programId: fx.meProgramId,
+              tradingKey: bob.tradingKey.publicKey,
+              market: fx.market,
+              slotIdx: SLOT,
+              userCommitment: bn254ToBE32(bob.ownerCommit),
+              noteCommitment: bob.depositNote!.commitment,
+              amount: BASE_AMT,
+              priceLimit: PRICE,
+              side: 1,
+              noteAmount: bob.depositNote!.amount,
+              expirySlot: expiry,
+              orderId: bobOrderId,
+              orderType: OrderType.Limit,
+            });
+            const txA = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+              a.ix,
+            );
+            const sigA = await sendAndConfirmTransaction(
+              fx.er, txA, [alice.tradingKey], { commitment: "confirmed" },
+            );
+            txline("alice: submit_order BUY 50 @ 100", sigA, "er");
+            const txB = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+              b.ix,
+            );
+            const sigB = await sendAndConfirmTransaction(
+              fx.er, txB, [bob.tradingKey], { commitment: "confirmed" },
+            );
+            txline("bob: submit_order SELL 50 @ 100", sigB, "er");
+          });
+          timer.markOrderAccepted();
+
+          const [batchPda] = batchResultsPda(fx.meProgramId, fx.market);
+          const preAcct = await fx.l1.getAccountInfo(batchPda, "confirmed");
+          const preHash = preAcct ? Buffer.from(preAcct.data).toString("hex") : null;
+
+          await timer.time("run_batch", "ER", async () => {
+            const tx = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+              buildRunBatchInstruction({
+                programId: fx.meProgramId,
+                vaultProgramId: fx.vaultProgramId,
+                teeAuthority: fx.teeKeypair.publicKey,
+                market: fx.market,
+                pythAccount: fx.pythAccount,
+                pendingOrderPdas: [aliceSlotPda, bobSlotPda],
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.er, tx, [fx.teeKeypair], { commitment: "confirmed" },
+            );
+            txline("run_batch", sig, "er");
+          });
+
+          await timer.time("undelegate_market + L1 commit poll", "ER+L1", async () => {
+            const tx = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+              buildUndelegateMarketInstruction({
+                programId: fx.meProgramId,
+                payer: fx.funder.publicKey,
+                market: fx.market,
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.er, tx, [fx.funder], { commitment: "confirmed" },
+            );
+            txline("undelegate_market", sig, "er");
+            await waitForL1AccountChange(fx.l1, batchPda, preHash, {
+              timeoutMs: 90_000, intervalMs: 1_000,
+            });
+          });
+
+          const brAcct = await fx.l1.getAccountInfo(batchPda, "confirmed");
+          if (!brAcct) throw new Error("BatchResults missing after undelegate");
+          const view = decodeBatchResults(new Uint8Array(brAcct.data));
+          const filled = view.results.find(
+            (r) =>
+              r.status === 1 &&
+              Buffer.from(r.ownerBuyer).equals(alice.tradingKey.publicKey.toBuffer()) &&
+              Buffer.from(r.ownerSeller).equals(bob.tradingKey.publicKey.toBuffer()),
+          );
+          if (!filled) throw new Error("no filled MatchResult for this run");
+          const matchId = filled.matchId;
+
+          step(4, "build payload + lock_note×2 + tee_forced_settle");
+          const noteCnonce = deriveNonce(matchId, TRADE_ROLE_BUYER);
+          const noteCblind = deriveBlinding(matchId, TRADE_ROLE_BUYER);
+          const noteCcommitment = await noteCommitment({
+            tokenMint: fx.baseMint.toBytes(), amount: BASE_AMT,
+            ownerCommitment: alice.ownerCommit,
+            nonce: be32ToBigInt(noteCnonce), blindingR: be32ToBigInt(noteCblind),
+          });
+
+          const noteDnonce = deriveNonce(matchId, TRADE_ROLE_SELLER);
+          const noteDblind = deriveBlinding(matchId, TRADE_ROLE_SELLER);
+          const noteDcommitment = await noteCommitment({
+            tokenMint: fx.quoteMint.toBytes(), amount: QUOTE_AMT,
+            ownerCommitment: bob.ownerCommit,
+            nonce: be32ToBigInt(noteDnonce), blindingR: be32ToBigInt(noteDblind),
+          });
+
+          const slot = await fx.l1.getSlot("confirmed");
+          const feeNonce = deriveNonce(BigInt(slot), FEE_ROLE_QUOTE);
+          const feeBlind = deriveBlinding(BigInt(slot), FEE_ROLE_QUOTE);
+          const feeCommitment = await noteCommitment({
+            tokenMint: fx.quoteMint.toBytes(), amount: BUYER_FEE,
+            ownerCommitment: protocol.ownerCommit,
+            nonce: be32ToBigInt(feeNonce), blindingR: be32ToBigInt(feeBlind),
+          });
+
+          const nullA = await nullifier(alice.spendingKey, alice.depositNote!.commitment);
+          const nullB = await nullifier(bob.spendingKey, bob.depositNote!.commitment);
+
+          const payload: MatchResultPayload = exactFillPayload({
+            matchId: asU8a16(matchId),
+            noteAcommitment: alice.depositNote!.commitment,
+            noteBcommitment: bob.depositNote!.commitment,
+            noteCcommitment,
+            noteDcommitment,
+            nullifierA: nullA,
+            nullifierB: nullB,
+            orderIdA: aliceOrderId,
+            orderIdB: bobOrderId,
+            baseAmount: BASE_AMT,
+            quoteAmount: QUOTE_AMT,
+          });
+          payload.buyerFeeAmt = BUYER_FEE;
+          payload.sellerFeeAmt = SELLER_FEE;
+          payload.noteFeeCommitment = feeCommitment;
+
+          const msg = canonicalPayloadHash(payload);
+          const teeSig = teeSign(fx.teeKeypair, msg);
+
+          await timer.time("lock_note ×2", "L1", async () => {
+            const tx = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+              buildLockNoteInstruction({
+                programId: fx.vaultProgramId,
+                teeAuthority: fx.teeKeypair.publicKey,
+                noteCommitment: alice.depositNote!.commitment,
+                orderId: aliceOrderId,
+                expirySlot: expiry,
+                amount: ALICE_DEPOSIT,
+              }),
+              buildLockNoteInstruction({
+                programId: fx.vaultProgramId,
+                teeAuthority: fx.teeKeypair.publicKey,
+                noteCommitment: bob.depositNote!.commitment,
+                orderId: bobOrderId,
+                expirySlot: expiry,
+                amount: BOB_DEPOSIT,
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.l1, tx, [fx.teeKeypair], { commitment: "confirmed" },
+            );
+            txline("lock_note(note_a) + lock_note(note_b)", sig);
+          });
+
+          await timer.time("Ed25519 + tee_forced_settle", "L1", async () => {
+            const tx = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+              buildEd25519VerifyIx({
+                teePubkey: fx.teeKeypair.publicKey.toBytes(),
+                signature: teeSig,
+                message: msg,
+              }),
+              buildSettleIx({
+                programId: fx.vaultProgramId,
+                teeAuthority: fx.teeKeypair.publicKey,
+                payload,
+              }),
+            );
+            const sig = await sendAndConfirmTransaction(
+              fx.l1, tx, [fx.teeKeypair], { commitment: "confirmed" },
+            );
+            txline("Ed25519 + tee_forced_settle", sig);
+          });
+
+          await fx.tree.append(noteCcommitment);
+          await fx.tree.append(noteDcommitment);
+          await fx.tree.append(feeCommitment);
+          const protocolFeeNote = {
+            mint: fx.quoteMint,
+            amount: BUYER_FEE,
+            nonce: feeNonce,
+            blindingR: feeBlind,
+            commitment: feeCommitment,
+            leafIndex: fx.tree.leafCount - 1,
+          };
+
+          step(5, "protocol-owner withdraws fee note");
+          await timer.time("VALID_SPEND + fee withdraw", "L1", async () => {
+            await proveAndWithdraw(
+              fx,
+              protocol,
+              protocolFeeNote,
+              protocolQuoteAta,
+              protocol.payer,
+              protocol.ownerBlinding,
+              "Protocol owner → QUOTE fee",
+            );
+          });
+          timer.markFirstWithdraw();
+          const protocolBalAfter = await fx.l1.getTokenAccountBalance(protocolQuoteAta);
+          expect(BigInt(protocolBalAfter.value.amount)).toBeGreaterThanOrEqual(BUYER_FEE);
+
+          timer.printSummary("real protocol-owner fee withdrawal");
+        } finally {
+          const restoreTx = new Transaction().add(
+            buildSetProtocolConfigInstruction({
+              programId: fx.vaultProgramId,
+              admin: fx.admin.publicKey,
+              protocolOwnerCommitment: previousProtocolCommitment,
+              feeRateBps: fx.protocolFeeBps,
+            }),
+          );
+          const restoreSig = await sendAndConfirmTransaction(
+            fx.l1, restoreTx, [fx.admin], { commitment: "confirmed" },
+          );
+          txline("restore set_protocol_config (original commitment)", restoreSig);
+          fx.protocolOwnerCommitment = previousProtocolCommitment;
+        }
       },
     );
   },

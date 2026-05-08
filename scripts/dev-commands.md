@@ -579,6 +579,38 @@ pass:
 The two derived metrics at the bottom let you compare runs across
 network conditions without eyeballing the per-row table.
 
+### 11A.6 New v1-hardening scenarios (privacy + continuation + real fee withdraw)
+
+All three live in `tests/change-note-flow.test.ts` and are gated on
+`RUN_CN_E2E=1`.
+
+```sh
+# Privacy regression: submit_order updates ER slot state while L1 slot bytes
+# and L1 trading-key signature history remain unchanged.
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts -t "privacy regression" )
+
+# Multi-batch continuation: partial fill in batch #1, residual fill in batch #2
+# without re-submitting Alice's continuing order.
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts -t "multi-batch continuation" )
+
+# Real protocol-owner fee withdrawal E2E:
+# set_protocol_config(real owner commitment) -> settle appends fee note ->
+# protocol owner proves VALID_SPEND and withdraws fee tokens.
+RUN_CN_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/change-note-flow.test.ts -t "real protocol-owner fee withdrawal" )
+```
+
 ---
 
 ## 12. Troubleshooting common failures
@@ -605,14 +637,16 @@ biggest open item. Remaining backlog:
 1. **Real TDX/SEV TEE + remote attestation** (Phase 6) — currently a
    local nacl keypair plays the TEE role.
 2. **Browser prover** (`WebProverSuite`) replacing the snarkjs shell-out.
-3. **Partial-fill + re-lock scenario** exercised on devnet (code paths
-   exist; ER test only covers exact fill).
+3. **Automated long-horizon continuation scheduler** for multi-batch
+   flows (tests now cover two-batch continuation; production needs
+   daemonised cadence + monitoring).
 4. **`undelegate_pending_order`** to release a user's slots back to
    L1 (so they can refund rent).
 5. **Emergency `force_undelegate_on_l1`** admin ix (pressure valve if
    ER is down).
-6. **Real protocol-owner keypair** for fee withdrawal (currently a
-   synthetic tag — fee notes accumulate but can't be spent).
+6. **Governance-owned protocol-owner key management** (tests now cover
+   real fee-note withdrawal with a key-derived commitment; production
+   still needs HSM/multisig custody + rotation policy).
 7. **Continuous ER ↔ L1 commit scheduler** inside the TEE loop.
 8. **Oracle refresh inside long-running ER sessions** (clone-at-open
    only today).
