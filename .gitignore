@@ -13,6 +13,7 @@ node_modules/
 dist/
 *.log
 .turbo/
+*.tsbuildinfo
 
 # Environment
 .env

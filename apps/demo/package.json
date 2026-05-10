@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "preinstall": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
-    "build:sdk": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
-    "diag:sdk": "echo '--- node_modules/@nyx/sdk ---' && ls -la node_modules/@nyx/sdk 2>/dev/null || echo 'MISSING' && echo '--- node_modules/@nyx/sdk/dist ---' && ls -la node_modules/@nyx/sdk/dist 2>/dev/null || echo 'NO DIST' && echo '--- node_modules/@nyx/sdk/package.json main ---' && cat node_modules/@nyx/sdk/package.json 2>/dev/null | head -20 || echo 'NO PKG'",
+    "preinstall": "cd ../../packages/sdk && rm -rf dist tsconfig.tsbuildinfo && npm install --no-audit --no-fund && npx tsc -p tsconfig.json && test -f dist/index.js && echo 'SDK build OK'",
+    "build:sdk": "cd ../../packages/sdk && rm -rf dist tsconfig.tsbuildinfo && npm install --no-audit --no-fund && npx tsc -p tsconfig.json",
+    "ensure:sdk": "test -f ../../packages/sdk/dist/index.js || (echo '@nyx/sdk dist missing - rebuilding' && npm run build:sdk) && test -f ../../packages/sdk/dist/index.js",
     "dev": "next dev",
-    "build": "npm run diag:sdk && next build",
+    "build": "npm run ensure:sdk && next build",
     "start": "next start",
     "lint": "eslint"
   },
