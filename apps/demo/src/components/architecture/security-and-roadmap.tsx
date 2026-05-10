@@ -34,14 +34,14 @@ const NOT_YET = [
     title: "Off-chain indexer for shielded notes",
     body: "Without one, the dapp reconstructs the Merkle tree from RPC history every time. See apps/demo/ARCHITECTURE.md §2 for the eleven workarounds.",
   },
-  {
-    title: "Partial-fill rotation on devnet",
-    body: "The on-chain code paths and litesvm tests exist; no devnet test currently drives collateral rotation across two batches.",
-  },
-  {
-    title: "undelegate_pending_order",
-    body: "Let users release a slot back to L1 to refund rent. Today slots stay delegated forever.",
-  },
+  // {
+  //   title: "Partial-fill rotation on devnet",
+  //   body: "The on-chain code paths and litesvm tests exist; no devnet test currently drives collateral rotation across two batches.",
+  // },
+  // {
+  //   title: "undelegate_pending_order",
+  //   body: "Let users release a slot back to L1 to refund rent. Today slots stay delegated forever.",
+  // },
   {
     title: "Continuous ER ↔ L1 commit scheduler inside the TEE",
     body: "Production wants commit_market_state every N slots so settlement can pick up matches without a full undelegate cycle.",

@@ -274,9 +274,8 @@ export function PrivateDepositWithdrawPanel() {
       if (/insufficient funds/i.test(msg)) {
         msg += [
           "",
-          "This is your SPL token balance, not the Merkle tree.",
-          "Amount above is in human token units; it gets multiplied by 10^decimals before tx.",
-          "Lower the amount or use Re-derive in the identity panel to mint more BASE/QUOTE.",
+          "This is your wallet's plain SPL balance — not your shielded pool balance.",
+          "Lower the amount, or hit Re-derive in the identity panel to top up demo BASE/QUOTE.",
         ].join("\n");
       }
       setError(msg);
@@ -308,17 +307,15 @@ export function PrivateDepositWithdrawPanel() {
         <div>
           <h2 className="text-lg font-semibold text-zinc-900">Private deposit / withdraw</h2>
           <p className="mt-1 max-w-xl text-xs text-zinc-600">
-            End-to-end privacy primitive: deposit a shielded note, then later prove ownership and
-            withdraw it via a <code className="mx-1 rounded bg-zinc-100 px-1">VALID_SPEND</code>
-            Groth16 proof. The proof runs <span className="font-semibold">in your browser</span>{" "}
-            (snarkjs in a Web Worker), the Merkle witness is reconstructed from the
-            <code className="mx-1 rounded bg-zinc-100 px-1">right_path</code> snapshot taken at
-            deposit time. The identity step above auto-airdrops BASE + QUOTE so this panel
-            should always have funds — if not, click <em>Refresh</em> to pull a fresh balance.
-            Run withdraw <em>before</em>{" "}
-            <code className="mx-1 rounded bg-zinc-100 px-1">submit_order</code> /{" "}
-            <code className="mx-1 rounded bg-zinc-100 px-1">run_batch</code> — those append
-            additional leaves and break the &ldquo;your note is the latest leaf&rdquo; invariant.
+            End-to-end privacy primitive. A deposit hashes a fresh shielded note — a
+            Poseidon commitment over <span className="font-mono">(token, amount, owner, blinding)</span> —
+            and inserts it into the on-chain Merkle tree. To withdraw, your browser
+            proves <code className="mx-1 rounded bg-zinc-100 px-1">VALID_SPEND</code> in
+            Groth16: it reveals a nullifier (so the note can&rsquo;t be double-spent) and
+            asserts a Merkle inclusion witness for that commitment — without disclosing
+            which leaf is yours, who deposited it, or how much it&rsquo;s worth.
+            Run withdraw <em>before</em> placing a trade on the same identity, otherwise
+            new leaves invalidate the cached witness.
           </p>
         </div>
         <div className="flex gap-2">
@@ -399,12 +396,6 @@ export function PrivateDepositWithdrawPanel() {
                 disabled={step !== "idle"}
               />
             </label>
-            <span className="max-w-xs text-[11px] leading-snug text-zinc-500">
-              Human token units (what the explorer shows). BASE has{" "}
-              {balances?.base?.decimals ?? "?"} decimals, QUOTE has{" "}
-              {balances?.quote?.decimals ?? "?"}. We convert to on-chain u64 atoms before
-              submitting. Must be ≤ your SPL balance above.
-            </span>
           </div>
 
           {tracking ? (
@@ -442,8 +433,8 @@ export function PrivateDepositWithdrawPanel() {
           {step === "withdrawn" ? (
             <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
               <span className="font-semibold">Withdraw confirmed.</span> Your shielded note has been
-              spent — the on-chain nullifier PDA is now created so the same note can never be
-              double-spent.
+              spent — the on-chain nullifier is now recorded, so this note can never be re-spent or
+              linked back to its deposit.
             </div>
           ) : null}
 

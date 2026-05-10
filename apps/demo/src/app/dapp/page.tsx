@@ -182,12 +182,12 @@ export default function DappPage() {
                 withdraw flow.
               </p>
               <ol className="mt-3 list-inside list-decimal space-y-1 text-nyx-ink/80">
-                <li>Connect a Phantom wallet (devnet cluster).</li>
-                <li>Sign a deterministic message to derive your darkpool master seed.</li>
-                <li>Register your wallet commitment on-chain.</li>
-                <li>Get airdropped a test token pair from the faucet.</li>
-                <li>Deposit into the program vault and place a private order.</li>
-                <li>Let the backend persona auto-match, then withdraw your fill.</li>
+                <li>Connect a Phantom wallet on devnet.</li>
+                <li>Sign a fixed message — your darkpool keys are derived from that signature alone.</li>
+                <li>Register your Poseidon wallet commitment on-chain (verified with a Groth16 proof).</li>
+                <li>Get a small airdrop of demo BASE + QUOTE tokens.</li>
+                <li>Deposit into the shielded pool and place an encrypted bid on the Ephemeral Rollup.</li>
+                <li>A counterparty fills it; settlement writes shielded buyer / seller notes back to L1.</li>
               </ol>
             </section>
           ) : null}

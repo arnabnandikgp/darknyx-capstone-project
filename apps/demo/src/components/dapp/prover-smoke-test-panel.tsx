@@ -31,10 +31,10 @@ interface StepState {
 }
 
 const INITIAL_STEPS: StepState[] = [
-  { label: "Fetch deterministic fixture from server", status: "idle" },
-  { label: "Boot WebProverSuite (worker + snarkjs)", status: "idle" },
+  { label: "Fetch a deterministic fixture from the server", status: "idle" },
+  { label: "Boot the in-browser prover (Web Worker + snarkjs)", status: "idle" },
   { label: "Generate VALID_WALLET_CREATE Groth16 proof", status: "idle" },
-  { label: "Verify public input matches server commitment", status: "idle" },
+  { label: "Verify the public input matches the server commitment", status: "idle" },
 ];
 
 function bytesToHex(b: Uint8Array): string {
@@ -139,11 +139,12 @@ export function ProverSmokeTestPanel() {
             Browser ZK prover · smoke test
           </h2>
           <p className="mt-1 max-w-xl text-xs text-zinc-600">
-            Verifies that <code className="rounded bg-zinc-100 px-1">snarkjs</code> can
-            generate a <code className="rounded bg-zinc-100 px-1">VALID_WALLET_CREATE</code>{" "}
-            proof inside a Web Worker using the wasm + zkey served from{" "}
-            <code className="rounded bg-zinc-100 px-1">/circuits</code>. Run this once
-            after a fresh build to confirm the prover pipeline is healthy.
+            Stand-alone health-check for the in-browser prover. Generates a{" "}
+            <code className="rounded bg-zinc-100 px-1">VALID_WALLET_CREATE</code>{" "}
+            Groth16 proof end-to-end (snarkjs in a Web Worker) and verifies that
+            the public input it produces matches what the server independently
+            computed for the same fixture. No wallet, no session — just a single
+            click to confirm the pipeline is wired up.
           </p>
         </div>
         <button

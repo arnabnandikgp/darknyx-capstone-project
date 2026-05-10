@@ -207,8 +207,9 @@ export function DappTradeFlowPanel() {
     const bidNotional = baseAtoms * priceLim;
     if (quoteAtoms < bidNotional) {
       throw new Error(
-        `Quote deposit (base_atoms×${quotePerBaseAtomic}=${quoteAtoms}) is smaller than bid notional (base_atoms×price_limit=${bidNotional}). ` +
-          `Raise DEMO_EXCHANGE_QUOTE_PER_BASE / NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE or lower the order price (see README).`,
+        `Quote deposit (${formatAtoms(quoteAtoms, quoteDecimals)} QUOTE) is smaller than ` +
+          `the bid notional (${formatAtoms(bidNotional, quoteDecimals)} QUOTE). ` +
+          `Lower the base size or the order price so the shielded deposit covers the trade.`,
       );
     }
     setBusy(true);
@@ -252,8 +253,9 @@ export function DappTradeFlowPanel() {
     const required = baseAtoms * priceLim;
     if (required > noteAmt) {
       throw new Error(
-        `Bid notional base_atoms×price_limit (${baseAtoms}×${priceLim}=${required}) exceeds your quote note (${noteAmt}). ` +
-          `Either lower base size / price_limit, or deposit more quote (note must cover amount×price_limit; on-chain code: MatchingError::NotionalExceedsNoteValue / 0x177a).`,
+        `Bid notional (${formatAtoms(required, quoteDecimals)} QUOTE) exceeds your shielded ` +
+          `quote note (${formatAtoms(noteAmt, quoteDecimals)} QUOTE). ` +
+          `Lower the base size or price limit, or deposit more quote.`,
       );
     }
     setBusy(true);
@@ -396,7 +398,7 @@ export function DappTradeFlowPanel() {
             : step === "deposited"
               ? "Submit bid on ER"
               : step === "order_er"
-                ? "Counterparty + run_batch"
+                ? "Match privately & settle on L1"
                 : "Continue";
 
   return (
@@ -405,23 +407,15 @@ export function DappTradeFlowPanel() {
         <div>
           <h2 className="text-lg font-semibold text-zinc-900">Trade on devnet</h2>
           <p className="mt-1 max-w-xl text-xs text-zinc-600">
-            Mock-oracle peg:{" "}
+            Place a shielded bid that&rsquo;s matched inside the MagicBlock Ephemeral
+            Rollup. Your order&rsquo;s size, side, and price-limit stay encrypted on
+            the rollup; only a TEE-signed match result lands on L1, where the vault
+            writes fresh shielded notes for buyer and seller. The demo pegs{" "}
             <span className="font-mono font-semibold text-zinc-800">
               1 BASE = {humanQuotePerBase.toString()} QUOTE
             </span>{" "}
-            (on-chain <code className="rounded bg-zinc-100 px-1">price_limit</code> ={" "}
-            <span className="font-mono">{quotePerBaseAtomic.toString()}</span> quote-atoms per
-            base-atom; BASE {baseDecimals}d · QUOTE {quoteDecimals}d
-            {baseDecimals === quoteDecimals ? (
-              <> — same decimals, so the human peg matches the atomic ratio.</>
-            ) : (
-              <> — multiply the atomic ratio by 10<sup>(BASEd−QUOTEd)</sup> for human tokens.</>
-            )}{" "}
-            Default bid limit <span className="font-mono">{orderPriceLimitStr}</span> keeps{" "}
-            <span className="font-mono">amount × price_limit ≤ note_amount</span> inside the
-            oracle&rsquo;s ±5% circuit breaker. Needs{" "}
-            <code className="rounded bg-zinc-100 px-1">.devnet/e2e-config.json</code> and{" "}
-            <code className="rounded bg-zinc-100 px-1">DEMO_MAKER_SECRET_BASE58</code>.
+            against a mock oracle (±5% circuit breaker), so the default bid clears
+            without any taker price discovery.
           </p>
         </div>
         <button
@@ -455,7 +449,7 @@ export function DappTradeFlowPanel() {
                 try {
                   const ba = toAtoms(baseAmount || "0", baseDecimals);
                   const qa = ba * quotePerBaseAtomic;
-                  return `quote leg: ${formatAtoms(qa, quoteDecimals)} QUOTE (${qa} atoms) · nonce ${depositNonce}`;
+                  return `quote leg: ${formatAtoms(qa, quoteDecimals)} QUOTE · nonce ${depositNonce}`;
                 } catch {
                   return `invalid amount · nonce ${depositNonce}`;
                 }
@@ -484,8 +478,9 @@ export function DappTradeFlowPanel() {
 
           {step === "matched" ? (
             <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-              <span className="font-semibold">Settlement complete.</span> On-chain withdraw still needs a Merkle
-              proof source + browser <code className="mx-1 rounded bg-white px-1">VALID_SPEND</code> proof.
+              <span className="font-semibold">Settlement complete.</span> Your BASE fill landed as a fresh shielded
+              note. Withdrawing that note on-chain needs a synchronized Merkle witness — that&rsquo;s wired up to
+              an indexer in the next milestone.
             </div>
           ) : null}
 

@@ -164,10 +164,15 @@ export async function POST(req: Request) {
     // conservation check (`note.amount - notional - fee` -> ConservationViolation
     // 0x178d) and (b) be rejected by tee_forced_settle. setup-devnet defaults
     // to 30 bps for production parity; transparently reset to 0 here.
+    //
+    // Surface it on the receipt as a neutral "fees set to zero for this demo"
+    // line — we don't want to advertise the 30 → 0 reduction, but the on-chain
+    // signature is worth keeping visible so anyone auditing on the explorer
+    // can confirm vault_config.fee_rate_bps actually flipped.
     const feeOutcome = await ensureZeroProtocolFee(l1, programs.vaultProgramId, admin);
     if (feeOutcome.zeroed && feeOutcome.signature) {
       signatures.push({
-        label: `set_protocol_config(fee_rate_bps=0) — was ${feeOutcome.observedFeeBps}bps`,
+        label: "protocol fees set to 0 for this demo",
         signature: feeOutcome.signature,
         cluster: "l1",
       });

@@ -284,20 +284,20 @@ export function WalletIdentityPanel() {
         <div>
           <h2 className="text-lg font-semibold text-zinc-900">Derive your darkpool identity</h2>
           <p className="mt-1 max-w-xl text-xs text-zinc-600">
-            Phantom will pop up to sign the deterministic message{" "}
+            Phantom signs a fixed message (
             <code className="rounded bg-zinc-100 px-1 font-mono text-[11px]">
               {SEED_MESSAGE_TEXT}
             </code>
-            . The signature drives a server-side master-seed derivation
-            (sha512(sig)[:64]), four-key derivation, and Poseidon-based wallet
-            commitment. Your browser then generates a{" "}
+            ). That signature is the only source of entropy for your darkpool
+            master seed — we derive a spending key, a viewing key, and a
+            Poseidon-hashed wallet commitment from it. Your browser then proves{" "}
             <code className="rounded bg-zinc-100 px-1 font-mono text-[11px]">
               VALID_WALLET_CREATE
             </code>{" "}
-            zk-SNARK locally. The response also includes a devnet-only trading
-            keypair (derived from the same seed) used to sign{" "}
-            <code className="rounded bg-zinc-100 px-1 font-mono text-[11px]">submit_order</code>{" "}
-            on the Ephemeral Rollup — Phantom never sees that key.
+            (Groth16) to bind that commitment on-chain without revealing any of
+            the keys. A separate trading keypair, derived from the same seed,
+            signs your orders inside the Ephemeral Rollup — Phantom never sees
+            that key.
           </p>
         </div>
         <div className="flex gap-2">
@@ -471,7 +471,7 @@ function IdentityCard({
     [
       "trading pubkey (ER)",
       shortenHex(identity.derived.trading.publicKeyBase58, 12, 8),
-      "signs submit_order on MagicBlock ER",
+      "signs orders inside the MagicBlock Ephemeral Rollup",
     ],
     [
       "owner commitment",

@@ -15,11 +15,11 @@ export function ArchitectureHero() {
           giving up on-chain auditability. Source-of-truth lives in{" "}
           <a
             className="text-nyx-chalk underline decoration-nyx-fog/40 underline-offset-4 hover:decoration-nyx-chalk"
-            href="https://github.com"
+            href="https://github.com/skysail-labs/darknyx/blob/main/docs/ARCHITECTURE.md"
           >
             <code className="font-mono text-[13px]">docs/ARCHITECTURE.md</code>
           </a>{" "}
-          (full 549-line deep dive); this page is the visual map.
+          ,this page is the visual map.
         </p>
       </div>
     </section>
