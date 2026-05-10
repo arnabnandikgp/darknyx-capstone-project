@@ -192,7 +192,14 @@ async function walkTransactionOrdered(
         } else {
           // Parsed/JSON inner ix shape (rare with maxSupportedTransactionVersion=0 +
           // raw transactions but defensive): `data` is base58 per JSON-RPC docs.
-          const anyIx = ixi as { programId?: string; data?: string; accounts?: string[] };
+          // Cast through unknown because CompiledInstruction.accounts is number[]
+          // while the parsed JSON shape has string[] — TS rightly flags the
+          // overlap mismatch, but at this point we know we're in the parsed branch.
+          const anyIx = ixi as unknown as {
+            programId?: string;
+            data?: string;
+            accounts?: string[];
+          };
           pid = new PublicKey(anyIx.programId!);
           raw = anyIx.data ? bs58.decode(anyIx.data) : new Uint8Array();
           ixKeys = (anyIx.accounts ?? []).map((s) => new PublicKey(s));
