@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "preinstall": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
     "build:sdk": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
-    "build": "npm run build:sdk && next build",
+    "dev": "next dev",
+    "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
