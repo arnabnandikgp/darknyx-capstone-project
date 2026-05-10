@@ -2,11 +2,22 @@ import path from "node:path";
 
 import type { NextConfig } from "next";
 
+// On Vercel, Root Directory is set to `apps/demo` so cwd already resolves
+// modules inside `apps/demo/node_modules`. Setting a custom turbopack.root or
+// transpilePackages here previously broke @nyx/sdk resolution because we ship
+// the SDK as compiled JS in dist/ (no src/ shipped), and Turbopack tried to
+// re-transpile non-existent sources. Locally Next will print a multi-lockfile
+// warning; that is benign.
+const isVercel = !!process.env.VERCEL;
+
 const nextConfig: NextConfig = {
-  turbopack: {
-    root: path.join(__dirname, "..", ".."),
-  },
-  transpilePackages: ["@nyx/sdk"],
+  ...(isVercel
+    ? {}
+    : {
+        turbopack: {
+          root: path.join(__dirname, "..", ".."),
+        },
+      }),
   async headers() {
     return [
       {

@@ -5,8 +5,9 @@
   "scripts": {
     "preinstall": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
     "build:sdk": "cd ../../packages/sdk && npm install --no-audit --no-fund && npm run build",
+    "diag:sdk": "echo '--- node_modules/@nyx/sdk ---' && ls -la node_modules/@nyx/sdk 2>/dev/null || echo 'MISSING' && echo '--- node_modules/@nyx/sdk/dist ---' && ls -la node_modules/@nyx/sdk/dist 2>/dev/null || echo 'NO DIST' && echo '--- node_modules/@nyx/sdk/package.json main ---' && cat node_modules/@nyx/sdk/package.json 2>/dev/null | head -20 || echo 'NO PKG'",
     "dev": "next dev",
-    "build": "next build",
+    "build": "npm run diag:sdk && next build",
     "start": "next start",
     "lint": "eslint"
   },
