@@ -9,6 +9,7 @@ export * from "./utxo/note.js";
 export * from "./utxo/deposit.js";
 export * from "./utxo/withdraw.js";
 export * from "./zk/prover-suite.js";
+export * from "./zk/groth16-format.js";
 export * from "./idl/vault-client.js";
 export * from "./idl/matching-engine-client.js";
 export * from "./idl/seeds.js";

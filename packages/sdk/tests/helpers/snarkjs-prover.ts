@@ -29,14 +29,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import type { Groth16OnChainProof } from "../../src/idl/vault-client.js";
-
-// BN254 base field modulus, big-endian. Used to compute -y mod P for pi_a.
-// Mirrors the constant in programs/vault/tests/common/mod.rs::negate_g1.
-const BN254_P = new Uint8Array([
-  0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81,
-  0x81, 0x58, 0x5d, 0x97, 0x81, 0x6a, 0x91, 0x68, 0x71, 0xca, 0x8d, 0x3c, 0x20,
-  0x8c, 0x16, 0xd8, 0x7c, 0xfd, 0x47,
-]);
+import { formatGroth16ForOnChain } from "../../src/zk/groth16-format.js";
 
 export interface SnarkjsProofResult {
   proof: Groth16OnChainProof;
@@ -94,97 +87,11 @@ export function snarkjsFullProve(
   const proofJson = JSON.parse(readFileSync(proofPath, "utf8"));
   const publicJson = JSON.parse(readFileSync(publicPath, "utf8"));
 
-  const piA = groth16G1Bytes(proofJson.pi_a);
-  const piB = groth16G2Bytes(proofJson.pi_b);
-  const piC = groth16G1Bytes(proofJson.pi_c);
-
-  const piANeg = negateG1(piA);
-
-  const publicInputsBE: Uint8Array[] = publicJson.map((s: string) =>
-    decToBe32(s),
-  );
-
   try {
     rmSync(tmp, { recursive: true, force: true });
   } catch {
     // best-effort cleanup
   }
 
-  return {
-    proof: { piA: piANeg, piB, piC },
-    publicInputsBE,
-  };
-}
-
-// ─── Encoding helpers — byte-for-byte mirror of programs/vault/tests/common/mod.rs ───
-
-function decToBe32(s: string): Uint8Array {
-  // Pure long-division from decimal digits → 256 base.
-  if (!/^\d+$/.test(s)) throw new Error(`non-decimal: ${s}`);
-  let digits = Array.from(s, (c) => c.charCodeAt(0) - 48);
-  const out = new Uint8Array(32);
-  let byteIdx = 32;
-  while (digits.length > 0 && byteIdx > 0) {
-    let rem = 0;
-    const next: number[] = [];
-    for (const d of digits) {
-      const cur = rem * 10 + d;
-      const q = Math.floor(cur / 256);
-      rem = cur % 256;
-      if (!(next.length === 0 && q === 0)) next.push(q);
-    }
-    byteIdx -= 1;
-    out[byteIdx] = rem;
-    digits = next;
-  }
-  return out;
-}
-
-function groth16G1Bytes(v: string[]): Uint8Array {
-  const out = new Uint8Array(64);
-  out.set(decToBe32(v[0]), 0);
-  out.set(decToBe32(v[1]), 32);
-  return out;
-}
-
-function groth16G2Bytes(v: string[][]): Uint8Array {
-  // G2 is Fq2: coefficient pairs come out of snarkjs as (c0, c1) but the
-  // on-chain verifier (groth16-solana) expects the BE serialisation
-  // (c1 || c0) — swap both x and y.
-  const x0 = decToBe32(v[0][0]);
-  const x1 = decToBe32(v[0][1]);
-  const y0 = decToBe32(v[1][0]);
-  const y1 = decToBe32(v[1][1]);
-  const out = new Uint8Array(128);
-  out.set(x1, 0);
-  out.set(x0, 32);
-  out.set(y1, 64);
-  out.set(y0, 96);
-  return out;
-}
-
-function negateG1(point: Uint8Array): Uint8Array {
-  if (point.length !== 64) throw new Error("G1 point must be 64 bytes");
-  const out = new Uint8Array(64);
-  out.set(point.subarray(0, 32), 0);
-  const yNeg = subBe(BN254_P, point.subarray(32, 64));
-  out.set(yNeg, 32);
-  return out;
-}
-
-function subBe(a: Uint8Array, b: Uint8Array): Uint8Array {
-  if (a.length !== 32 || b.length !== 32) throw new Error("32B operands only");
-  const out = new Uint8Array(32);
-  let borrow = 0;
-  for (let i = 31; i >= 0; i--) {
-    const diff = a[i] - b[i] - borrow;
-    if (diff < 0) {
-      out[i] = diff + 256;
-      borrow = 1;
-    } else {
-      out[i] = diff;
-      borrow = 0;
-    }
-  }
-  return out;
+  return formatGroth16ForOnChain(proofJson, publicJson);
 }
