@@ -12,8 +12,8 @@ export interface DemoE2eConfigJson {
   matchingEngineProgramId: string;
   pythAccount: string;
   market: { pubkey: string };
-  baseMint: { pubkey: string };
-  quoteMint: { pubkey: string };
+  baseMint: { pubkey: string; decimals: number };
+  quoteMint: { pubkey: string; decimals: number };
 }
 
 export function resolveRepoRoot(): string {

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { useDappContext } from "@/lib/dapp/dapp-context";
+import { formatAtoms, toAtoms } from "@/lib/dapp/decimals";
 import { instructionFromJson, type InstructionJson } from "@/lib/dapp/ix-json";
 import { readDappSession, type DappSessionV1 } from "@/lib/dapp/dapp-session";
 
@@ -21,14 +22,24 @@ type ReceiptLine = { label: string; signature: string };
 
 type PanelStep = "idle" | "deposited" | "proving" | "withdrawn";
 
+interface MintBalance {
+  ata: string;
+  exists: boolean;
+  amount: string;
+  mintBase58: string;
+  decimals: number;
+}
+
 interface BalancesResponse {
   ok: boolean;
   error?: string;
-  base?: { ata: string; exists: boolean; amount: string; mintBase58: string };
-  quote?: { ata: string; exists: boolean; amount: string; mintBase58: string };
+  base?: MintBalance;
+  quote?: MintBalance;
 }
 
-const DEFAULT_AMOUNT = process.env.NEXT_PUBLIC_DEMO_PRIVATE_AMOUNT ?? "10000";
+// Default is now in *human* token units (was previously raw atoms — which is
+// what made the explorer show 10000 → 0.01 for 6-decimal QUOTE).
+const DEFAULT_AMOUNT = process.env.NEXT_PUBLIC_DEMO_PRIVATE_AMOUNT ?? "10";
 
 function txUrl(sig: string) {
   return `https://explorer.solana.com/tx/${sig}?cluster=devnet`;
@@ -93,24 +104,32 @@ export function PrivateDepositWithdrawPanel() {
     }
   };
 
+  const decimalsForSide = (s: "base" | "quote"): number | null => {
+    const b = s === "base" ? balances?.base : balances?.quote;
+    return b ? b.decimals : null;
+  };
+
   const append = (lines: ReceiptLine[]) => setReceipt((r) => [...r, ...lines]);
 
   const runDeposit = async () => {
     const s = readDappSession();
     if (!s) throw new Error("Complete the identity step above first.");
-    const want = (() => {
-      try {
-        return BigInt(amount || "0");
-      } catch {
-        return 0n;
-      }
-    })();
-    if (want <= 0n) throw new Error("Amount must be a positive integer (raw u64 units).");
+    const dec = decimalsForSide(side);
+    if (dec == null) {
+      throw new Error("Token decimals not loaded yet — hit Refresh and try again.");
+    }
+    let wantAtoms: bigint;
+    try {
+      wantAtoms = toAtoms(amount, dec);
+    } catch (e) {
+      throw new Error(e instanceof Error ? e.message : String(e));
+    }
+    if (wantAtoms <= 0n) throw new Error("Amount must be > 0.");
     const have = balanceForSide(side);
-    if (have != null && want > have) {
+    if (have != null && wantAtoms > have) {
       throw new Error(
         [
-          `Amount ${want} exceeds your ${side.toUpperCase()} balance ${have}.`,
+          `Amount ${amount} ${side.toUpperCase()} (${wantAtoms} atoms) exceeds your balance ${formatAtoms(have, dec)} (${have} atoms).`,
           "Lower the amount, or hit Refresh to retry the auto-airdrop.",
         ].join(" "),
       );
@@ -124,7 +143,8 @@ export function PrivateDepositWithdrawPanel() {
         phantomSignatureBase58: s.phantomSignatureBase58,
         ownerPubkeyBase58: s.ownerPubkeyBase58,
         side,
-        amount,
+        // API expects raw u64 atoms; UI input is in human token units.
+        amount: wantAtoms.toString(),
         nonce: (BigInt(Date.now()) + 7_777n).toString(),
       }),
     });
@@ -255,7 +275,7 @@ export function PrivateDepositWithdrawPanel() {
         msg += [
           "",
           "This is your SPL token balance, not the Merkle tree.",
-          "Amount is in raw smallest units (same as on-chain u64).",
+          "Amount above is in human token units; it gets multiplied by 10^decimals before tx.",
           "Lower the amount or use Re-derive in the identity panel to mint more BASE/QUOTE.",
         ].join("\n");
       }
@@ -329,7 +349,9 @@ export function PrivateDepositWithdrawPanel() {
                 BASE balance
               </div>
               <div className="mt-0.5 font-mono">
-                {balances?.base?.amount ?? "?"}
+                {balances?.base
+                  ? `${formatAtoms(balances.base.amount, balances.base.decimals)} BASE`
+                  : "?"}
                 {balances?.base && !balances.base.exists ? (
                   <span className="ml-2 text-amber-700">(no ATA yet)</span>
                 ) : null}
@@ -340,7 +362,9 @@ export function PrivateDepositWithdrawPanel() {
                 QUOTE balance
               </div>
               <div className="mt-0.5 font-mono">
-                {balances?.quote?.amount ?? "?"}
+                {balances?.quote
+                  ? `${formatAtoms(balances.quote.amount, balances.quote.decimals)} QUOTE`
+                  : "?"}
                 {balances?.quote && !balances.quote.exists ? (
                   <span className="ml-2 text-amber-700">(no ATA yet)</span>
                 ) : null}
@@ -376,8 +400,10 @@ export function PrivateDepositWithdrawPanel() {
               />
             </label>
             <span className="max-w-xs text-[11px] leading-snug text-zinc-500">
-              Raw smallest units (on-chain u64), not wallet UI &ldquo;tokens&rdquo;. Must be ≤ your
-              SPL balance after airdrop (e.g. 10&nbsp;000 is safe for small test balances).
+              Human token units (what the explorer shows). BASE has{" "}
+              {balances?.base?.decimals ?? "?"} decimals, QUOTE has{" "}
+              {balances?.quote?.decimals ?? "?"}. We convert to on-chain u64 atoms before
+              submitting. Must be ≤ your SPL balance above.
             </span>
           </div>
 

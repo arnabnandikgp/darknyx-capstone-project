@@ -10,6 +10,7 @@ import { NyxNav } from "@/components/brand/nyx-nav";
 import { ProverSmokeTestPanel } from "@/components/dapp/prover-smoke-test-panel";
 import { DappTradeFlowPanel } from "@/components/dapp/dapp-trade-flow-panel";
 import { PrivateDepositWithdrawPanel } from "@/components/dapp/private-deposit-withdraw-panel";
+import { sanitizeRpcUrl } from "@/lib/dapp/sanitize-url";
 // TODO(post-trade BASE withdraw): re-enable once we have an indexer (or in-process
 // snapshot) so the VALID_SPEND witness is stable on a busy devnet. Today the
 // Merkle reconstruction races other vault txs and the "Merkle witness root !=
@@ -123,7 +124,9 @@ export default function DappPage() {
             <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
               <StatusPill
                 label="rpc"
-                value={endpoint || "—"}
+                // Show only the hostname — never the query string, which is
+                // where API keys (`?api-key=...`) typically live.
+                value={sanitizeRpcUrl(endpoint)}
                 mono
               />
               <StatusPill

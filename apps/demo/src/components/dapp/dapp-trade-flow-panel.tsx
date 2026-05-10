@@ -5,24 +5,20 @@ import { Connection, Keypair, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 
 import { useDappContext } from "@/lib/dapp/dapp-context";
+import { formatAtoms, toAtoms } from "@/lib/dapp/decimals";
 import { instructionFromJson, type InstructionJson } from "@/lib/dapp/ix-json";
 import { readDappSession, type DappSessionV1 } from "@/lib/dapp/dapp-session";
 
 import { NYX_TRADE_WITHDRAW_KEY } from "@/lib/dapp/trade-withdraw-storage";
 
 const ER_RPC = process.env.NEXT_PUBLIC_DEMO_ER_RPC_URL ?? "https://devnet.magicblock.app";
-/**
- * `setup-devnet` provisions a mock oracle with TWAP = 100 and circuit_breaker_bps = 500
- * (5%). The clearing price must land inside [95, 105] or `run_batch` skips the match
- * with the circuit breaker tripped (and BatchResults.write_cursor stays at zero).
- * We default the exchange rate (and order price limit) to 100 to sit at the centre
- * of that band. Override with `NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE` if your
- * oracle is configured differently.
- */
-const QUOTE_PER_BASE = BigInt(process.env.NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE ?? "100");
-/** Bid `submit_order` requires `amount * price_limit <= note_amount` (on-chain MatchingError::NotionalExceedsNoteValue). Quote deposit is `base * QUOTE_PER_BASE`, so default the limit to the same peg unless overridden. */
-const ORDER_PRICE_LIMIT =
-  process.env.NEXT_PUBLIC_DEMO_ORDER_PRICE ?? QUOTE_PER_BASE.toString();
+
+type TokenMeta = {
+  baseDecimals: number;
+  quoteDecimals: number;
+  exchangeQuotePerBaseAtomic: string;
+  orderPriceLimit: string;
+};
 
 type FlowStep =
   | "idle"
@@ -51,8 +47,60 @@ export function DappTradeFlowPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [slotIdx, setSlotIdx] = useState<number | null>(null);
-  const [baseAmount, setBaseAmount] = useState("10");
+  /** Human BASE size; converted with mint decimals from `/api/dapp/token-meta`. */
+  const [baseAmount, setBaseAmount] = useState(
+    process.env.NEXT_PUBLIC_DEMO_BASE_HUMAN ?? "0.1",
+  );
   const [depositNonce] = useState(() => (BigInt(Date.now()) + 333_333n).toString());
+  const [tokenMeta, setTokenMeta] = useState<TokenMeta | null>(null);
+
+  const baseDecimals = tokenMeta?.baseDecimals ?? 6;
+  const quoteDecimals = tokenMeta?.quoteDecimals ?? 6;
+  const quotePerBaseAtomic = useMemo(
+    () => BigInt(tokenMeta?.exchangeQuotePerBaseAtomic ?? "100"),
+    [tokenMeta?.exchangeQuotePerBaseAtomic],
+  );
+  const orderPriceLimitStr = tokenMeta?.orderPriceLimit ?? "100";
+  const humanQuotePerBase = useMemo(
+    () =>
+      quotePerBaseAtomic * 10n ** BigInt(Math.max(0, baseDecimals - quoteDecimals)),
+    [quotePerBaseAtomic, baseDecimals, quoteDecimals],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/dapp/token-meta");
+        const j = (await res.json()) as {
+          ok?: boolean;
+          baseDecimals?: number;
+          quoteDecimals?: number;
+          exchangeQuotePerBaseAtomic?: string;
+          orderPriceLimit?: string;
+        };
+        if (cancelled || !res.ok || !j.ok) return;
+        if (
+          typeof j.baseDecimals === "number" &&
+          typeof j.quoteDecimals === "number" &&
+          j.exchangeQuotePerBaseAtomic &&
+          j.orderPriceLimit
+        ) {
+          setTokenMeta({
+            baseDecimals: j.baseDecimals,
+            quoteDecimals: j.quoteDecimals,
+            exchangeQuotePerBaseAtomic: j.exchangeQuotePerBaseAtomic,
+            orderPriceLimit: j.orderPriceLimit,
+          });
+        }
+      } catch {
+        /* keep built-in defaults */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // SSR renders this component with a null session; hydration on the client
@@ -139,18 +187,28 @@ export function DappTradeFlowPanel() {
     setBusy(false);
   };
 
+  const baseAtomsForCurrentInput = (): bigint => {
+    let baseAtoms: bigint;
+    try {
+      baseAtoms = toAtoms(baseAmount, baseDecimals);
+    } catch (e) {
+      throw new Error(e instanceof Error ? e.message : String(e));
+    }
+    if (baseAtoms <= 0n) throw new Error("Base amount must be > 0");
+    return baseAtoms;
+  };
+
   const runDeposit = async () => {
     const s = readDappSession();
     if (!s) throw new Error("No session");
-    const base = BigInt(baseAmount || "0");
-    if (base <= 0n) throw new Error("Base amount must be > 0");
-    const quoteAmount = base * QUOTE_PER_BASE;
-    const priceLim = BigInt(ORDER_PRICE_LIMIT);
-    const bidNotional = base * priceLim;
-    if (quoteAmount < bidNotional) {
+    const baseAtoms = baseAtomsForCurrentInput();
+    const quoteAtoms = baseAtoms * quotePerBaseAtomic;
+    const priceLim = BigInt(orderPriceLimitStr);
+    const bidNotional = baseAtoms * priceLim;
+    if (quoteAtoms < bidNotional) {
       throw new Error(
-        `Quote deposit (base×${QUOTE_PER_BASE}=${quoteAmount}) is smaller than bid notional (base×price_limit=${bidNotional}). ` +
-          `Raise NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE or lower NEXT_PUBLIC_DEMO_ORDER_PRICE (see README).`,
+        `Quote deposit (base_atoms×${quotePerBaseAtomic}=${quoteAtoms}) is smaller than bid notional (base_atoms×price_limit=${bidNotional}). ` +
+          `Raise DEMO_EXCHANGE_QUOTE_PER_BASE / NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE or lower the order price (see README).`,
       );
     }
     setBusy(true);
@@ -162,7 +220,7 @@ export function DappTradeFlowPanel() {
         phantomSignatureBase58: s.phantomSignatureBase58,
         ownerPubkeyBase58: s.ownerPubkeyBase58,
         side: "quote",
-        amount: quoteAmount.toString(),
+        amount: quoteAtoms.toString(),
         nonce: depositNonce,
       }),
     });
@@ -177,7 +235,7 @@ export function DappTradeFlowPanel() {
     appendReceipt([{ label: "deposit quote collateral (L1)", signature: sig, cluster: "l1" }]);
     setDepositNote({
       commitmentHex: json.preview?.noteCommitmentHex ?? "",
-      amount: quoteAmount.toString(),
+      amount: quoteAtoms.toString(),
     });
     setStep("deposited");
     setBusy(false);
@@ -188,13 +246,13 @@ export function DappTradeFlowPanel() {
     if (!s || slotIdx == null || !depositNote?.commitmentHex) {
       throw new Error("Complete slot + deposit steps first.");
     }
-    const base = BigInt(baseAmount || "0");
-    const priceLim = BigInt(ORDER_PRICE_LIMIT || "0");
+    const baseAtoms = baseAtomsForCurrentInput();
+    const priceLim = BigInt(orderPriceLimitStr || "0");
     const noteAmt = BigInt(depositNote.amount);
-    const required = base * priceLim;
+    const required = baseAtoms * priceLim;
     if (required > noteAmt) {
       throw new Error(
-        `Bid notional base×price_limit (${base}×${priceLim}=${required}) exceeds your quote note (${noteAmt}). ` +
+        `Bid notional base_atoms×price_limit (${baseAtoms}×${priceLim}=${required}) exceeds your quote note (${noteAmt}). ` +
           `Either lower base size / price_limit, or deposit more quote (note must cover amount×price_limit; on-chain code: MatchingError::NotionalExceedsNoteValue / 0x177a).`,
       );
     }
@@ -216,8 +274,9 @@ export function DappTradeFlowPanel() {
         tradingSecretKeyBase58: s.tradingSecretKeyBase58,
         slotIdx,
         side: 0,
-        amount: baseAmount,
-        priceLimit: ORDER_PRICE_LIMIT,
+        // API expects raw u64 atoms.
+        amount: baseAtoms.toString(),
+        priceLimit: orderPriceLimitStr,
         noteAmount: depositNote.amount,
         expirySlot: expiry.toString(),
         noteCommitmentHex: depositNote.commitmentHex,
@@ -255,6 +314,7 @@ export function DappTradeFlowPanel() {
     if (!ctx?.orderIdHex || !ctx.expirySlot) {
       throw new Error("Internal: order id / expiry missing — submit_order step must run first.");
     }
+    const baseAtoms = baseAtomsForCurrentInput();
     const res = await fetch("/api/dapp/counter-and-match", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -264,8 +324,9 @@ export function DappTradeFlowPanel() {
         tradingSecretKeyBase58: s.tradingSecretKeyBase58,
         userSlotIdx: slotIdx,
         userSide: 0,
-        userAmount: baseAmount,
-        userPriceLimit: ORDER_PRICE_LIMIT,
+        // API expects raw u64 atoms (matches what submit_order on-chain used).
+        userAmount: baseAtoms.toString(),
+        userPriceLimit: orderPriceLimitStr,
         userNoteAmount: depositNote?.amount ?? "0",
         userNoteCommitmentHex: depositNote?.commitmentHex ?? "",
         userOwnerCommitmentHex: s.publicData.ownerCommitmentHex,
@@ -344,13 +405,21 @@ export function DappTradeFlowPanel() {
         <div>
           <h2 className="text-lg font-semibold text-zinc-900">Trade on devnet</h2>
           <p className="mt-1 max-w-xl text-xs text-zinc-600">
-            Fixed rate:{" "}
-            <span className="font-mono font-semibold text-zinc-800">1 BASE = {QUOTE_PER_BASE.toString()} QUOTE</span>
-            . Bid <code className="rounded bg-zinc-100 px-1">price_limit</code> defaults to the same peg (
-            <span className="font-mono">{ORDER_PRICE_LIMIT}</span>) so your quote deposit (
-            <span className="font-mono">base × {QUOTE_PER_BASE.toString()}</span>) satisfies{" "}
-            <span className="font-mono">amount × price_limit ≤ note_amount</span> on the ER. You place a{" "}
-            <span className="font-semibold">bid</span> (quote collateral). Needs{" "}
+            Mock-oracle peg:{" "}
+            <span className="font-mono font-semibold text-zinc-800">
+              1 BASE = {humanQuotePerBase.toString()} QUOTE
+            </span>{" "}
+            (on-chain <code className="rounded bg-zinc-100 px-1">price_limit</code> ={" "}
+            <span className="font-mono">{quotePerBaseAtomic.toString()}</span> quote-atoms per
+            base-atom; BASE {baseDecimals}d · QUOTE {quoteDecimals}d
+            {baseDecimals === quoteDecimals ? (
+              <> — same decimals, so the human peg matches the atomic ratio.</>
+            ) : (
+              <> — multiply the atomic ratio by 10<sup>(BASEd−QUOTEd)</sup> for human tokens.</>
+            )}{" "}
+            Default bid limit <span className="font-mono">{orderPriceLimitStr}</span> keeps{" "}
+            <span className="font-mono">amount × price_limit ≤ note_amount</span> inside the
+            oracle&rsquo;s ±5% circuit breaker. Needs{" "}
             <code className="rounded bg-zinc-100 px-1">.devnet/e2e-config.json</code> and{" "}
             <code className="rounded bg-zinc-100 px-1">DEMO_MAKER_SECRET_BASE58</code>.
           </p>
@@ -373,16 +442,24 @@ export function DappTradeFlowPanel() {
         <>
           <div className="mb-4 flex flex-wrap items-end gap-3">
             <label className="text-xs text-zinc-600">
-              Base size
+              Base size (BASE)
               <input
-                className="ml-2 w-24 rounded border border-zinc-300 px-2 py-1 font-mono text-sm"
+                className="ml-2 w-28 rounded border border-zinc-300 px-2 py-1 font-mono text-sm"
                 value={baseAmount}
                 onChange={(e) => setBaseAmount(e.target.value)}
                 disabled={step !== "idle" && step !== "registered"}
               />
             </label>
             <span className="text-xs font-mono text-zinc-500">
-              quote leg: {(BigInt(baseAmount || "0") * QUOTE_PER_BASE).toString()} · nonce {depositNonce}
+              {(() => {
+                try {
+                  const ba = toAtoms(baseAmount || "0", baseDecimals);
+                  const qa = ba * quotePerBaseAtomic;
+                  return `quote leg: ${formatAtoms(qa, quoteDecimals)} QUOTE (${qa} atoms) · nonce ${depositNonce}`;
+                } catch {
+                  return `invalid amount · nonce ${depositNonce}`;
+                }
+              })()}
             </span>
           </div>
 

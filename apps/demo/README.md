@@ -71,21 +71,28 @@ DEMO_USER_AIRDROP_BASE=1000000000
 DEMO_USER_AIRDROP_QUOTE=1000000000
 DEMO_COUNTERPARTY_MINT_UI=200000000000
 
-# Optional — fixed exchange rate (1 BASE = N QUOTE).
-# `setup-devnet` provisions a mock oracle with TWAP=100 and a 5% circuit
-# breaker — keep the rate (and bid price_limit) inside [95, 105] or
-# `run_batch` will trip the breaker and produce zero matches.
+# Optional — fixed exchange rate (quote-atoms per base-atom on-chain).
+# With mock TWAP=100 and ±5% circuit breaker, keep this inside [95, 105].
+# When BASE and QUOTE mints use the *same* decimals (default after bootstrap:
+# 6+6 from `devnet-setup.test.ts`), the human peg matches this number
+# (e.g. 100 → 1 BASE = 100 QUOTE). The dapp reads decimals + this ratio from
+# `GET /api/dapp/token-meta` (backed by `.devnet/e2e-config.json` on the server).
 DEMO_EXCHANGE_QUOTE_PER_BASE=100
 
-# ---- Public, browser-visible defaults ----
+# Optional — SPL mint decimals for *both* BASE and QUOTE when running the
+# one-shot devnet bootstrap (`packages/sdk/tests/devnet-setup.test.ts`).
+# Default 6. Changing this requires re-running setup and updating Vercel
+# `DEMO_E2E_CONFIG_JSON` / local `.devnet/e2e-config.json`.
+# DEMO_MINT_DECIMALS=6
+
+# ---- Public, browser-visible defaults (inlined into the client bundle) ----
 NEXT_PUBLIC_DEMO_ER_RPC_URL=https://devnet.magicblock.app
+# Must stay in [95, 105] with the mock oracle TWAP=100 unless you change the oracle.
 NEXT_PUBLIC_DEMO_EXCHANGE_QUOTE_PER_BASE=100
-# Omit to default bid price_limit to the same value as QUOTE_PER_BASE (so
-# amount×price_limit fits the quote note from step 4). Set higher only if
-# you also increase the quote deposit accordingly, AND keep the value
-# inside the mock-oracle's 5% circuit-breaker band [95, 105].
 # NEXT_PUBLIC_DEMO_ORDER_PRICE=100
-NEXT_PUBLIC_DEMO_PRIVATE_AMOUNT=10000
+# Human-token defaults for the trade / private-deposit panels
+NEXT_PUBLIC_DEMO_BASE_HUMAN=0.1
+NEXT_PUBLIC_DEMO_PRIVATE_AMOUNT=10
 ```
 
 Anything `NEXT_PUBLIC_*` is bundled into the client; all other vars stay

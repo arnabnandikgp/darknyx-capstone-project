@@ -10,7 +10,8 @@
  *
  *   1. Reads admin / tee / root_key keypairs from `.devnet/keypairs/`.
  *   2. Connects to devnet RPC.
- *   3. Creates two fresh SPL mints (BASE=9d, QUOTE=6d) and records them.
+ *   3. Creates two fresh SPL mints (BASE + QUOTE share the same decimal count,
+ *      default 6 each — override with DEMO_MINT_DECIMALS=0..9) and records them.
  *   4. Initialises the vault (if not already done) with the deployed program.
  *   5. Calls `set_protocol_config` to enable a 30 bps protocol fee, addressed
  *      to a synthetic protocol-owner commitment.
@@ -100,6 +101,23 @@ const PYTH_ACCOUNT = new PublicKey(
 );
 
 const PROTOCOL_FEE_BPS = Number(process.env.PROTOCOL_FEE_BPS ?? "30");
+
+/** SPL mint decimals for both BASE and QUOTE (0–9). Default 6 keeps human peg aligned with atomic `price_limit` when mock TWAP = 100. */
+const DEMO_MINT_DECIMALS = (() => {
+  const n = Number(process.env.DEMO_MINT_DECIMALS ?? "6");
+  if (!Number.isInteger(n) || n < 0 || n > 9) {
+    throw new Error("DEMO_MINT_DECIMALS must be an integer 0..9");
+  }
+  return n;
+})();
+
+function rpcHostLabel(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "(invalid-rpc-url)";
+  }
+}
 
 function loadKeypair(relPath: string): Keypair {
   const abs = resolve(REPO_ROOT, relPath);
@@ -211,7 +229,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
     rootKey = loadKeypair(requireEnv("ROOT_KEY_KEYPAIR"));
 
     banner("NYX DARKPOOL — DEVNET E2E SETUP");
-    bullet(`RPC:                   ${L1_RPC_URL}`);
+    bullet(`RPC:                   ${rpcHostLabel(L1_RPC_URL)}`);
     bullet(`vault program:         ${VAULT_PROGRAM_ID.toBase58()}`);
     bullet(`matching_engine:       ${ME_PROGRAM_ID.toBase58()}`);
     bullet(`pyth:                  ${PYTH_ACCOUNT.toBase58()}`);
@@ -219,6 +237,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
     bullet(`tee_authority:         ${tee.publicKey.toBase58()}`);
     bullet(`root_key:              ${rootKey.publicKey.toBase58()}`);
     bullet(`protocol fee (bps):    ${PROTOCOL_FEE_BPS}`);
+    bullet(`mint decimals (both):  ${DEMO_MINT_DECIMALS} (override with DEMO_MINT_DECIMALS)`);
 
     const bal = await connection.getBalance(admin.publicKey);
     bullet(`admin balance:         ${(bal / 1e9).toFixed(4)} SOL`);
@@ -234,7 +253,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
     { timeout: 180_000 },
     async () => {
       // ────────────────────────────────────────────────────────────────────
-      step(1, "Create BASE + QUOTE SPL mints (9-decimal / 6-decimal)");
+      step(1, `Create BASE + QUOTE SPL mints (${DEMO_MINT_DECIMALS} decimals each)`);
       // ────────────────────────────────────────────────────────────────────
       const baseMint = Keypair.generate();
       const quoteMint = Keypair.generate();
@@ -253,7 +272,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
         }),
         createInitializeMintInstruction(
           baseMint.publicKey,
-          9,
+          DEMO_MINT_DECIMALS,
           admin.publicKey,
           null,
           TOKEN_PROGRAM_ID,
@@ -267,7 +286,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
         }),
         createInitializeMintInstruction(
           quoteMint.publicKey,
-          6,
+          DEMO_MINT_DECIMALS,
           admin.publicKey,
           null,
           TOKEN_PROGRAM_ID,
@@ -279,7 +298,7 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
         [admin, baseMint, quoteMint],
         { commitment: "confirmed" },
       );
-      tx("created both SPL mints (BASE=9d, QUOTE=6d)", mintSig);
+      tx(`created both SPL mints (BASE=${DEMO_MINT_DECIMALS}d, QUOTE=${DEMO_MINT_DECIMALS}d)`, mintSig);
 
       // ────────────────────────────────────────────────────────────────────
       step(2, "Initialise vault_config (idempotent)");
@@ -434,12 +453,12 @@ maybeDescribe("Phase 5 devnet E2E — one-shot setup", () => {
         pythAccount: oracleAccount.toBase58(),
         baseMint: {
           pubkey: baseMint.publicKey.toBase58(),
-          decimals: 9,
+          decimals: DEMO_MINT_DECIMALS,
           secretKey: Array.from(baseMint.secretKey),
         },
         quoteMint: {
           pubkey: quoteMint.publicKey.toBase58(),
-          decimals: 6,
+          decimals: DEMO_MINT_DECIMALS,
           secretKey: Array.from(quoteMint.secretKey),
         },
         market: {

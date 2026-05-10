@@ -48,8 +48,16 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      base: { ...base, mintBase58: baseMint.toBase58() },
-      quote: { ...quote, mintBase58: quoteMint.toBase58() },
+      base: {
+        ...base,
+        mintBase58: baseMint.toBase58(),
+        decimals: cfg.baseMint.decimals,
+      },
+      quote: {
+        ...quote,
+        mintBase58: quoteMint.toBase58(),
+        decimals: cfg.quoteMint.decimals,
+      },
     });
   } catch (e) {
     return NextResponse.json(

@@ -267,7 +267,7 @@ RUN_DEVNET_E2E=1 \
 ```
 
 Setup steps (each prints a TX + explorer URL):
-1. Create fresh BASE (9d) + QUOTE (6d) SPL mint pair.
+1. Create fresh BASE + QUOTE SPL mint pair with the same decimal count (default **6** each; override with `DEMO_MINT_DECIMALS=0..9` when running `devnet-setup.test.ts`).
 2. `vault::initialize` (idempotent).
 3. **`vault::reset_merkle_tree`** — wipes the tree.
 4. `vault::set_protocol_config` — sets `protocol_owner_commitment` + fee

@@ -1,12 +1,21 @@
 "use client";
 
 import bs58 from "bs58";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useDappContext } from "@/lib/dapp/dapp-context";
+import { formatAtoms } from "@/lib/dapp/decimals";
 import { NYX_DAPP_SESSION_KEY } from "@/lib/dapp/dapp-session";
 
 const SEED_MESSAGE_TEXT = "NYX_DARKPOOL_SEED_V1";
+
+function formatAirdropAtoms(atoms: string, decimals: number): string {
+  try {
+    return formatAtoms(atoms, decimals);
+  } catch {
+    return atoms;
+  }
+}
 
 interface DeriveResponse {
   ok: true;
@@ -85,6 +94,30 @@ export function WalletIdentityPanel() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<IdentityState | null>(null);
+  const [mintDecimals, setMintDecimals] = useState({ base: 6, quote: 6 });
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/dapp/token-meta");
+        const j = (await res.json()) as {
+          ok?: boolean;
+          baseDecimals?: number;
+          quoteDecimals?: number;
+        };
+        if (cancelled || !res.ok || !j.ok) return;
+        if (typeof j.baseDecimals === "number" && typeof j.quoteDecimals === "number") {
+          setMintDecimals({ base: j.baseDecimals, quote: j.quoteDecimals });
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const owner = wallet.publicKey?.toBase58() ?? null;
 
@@ -302,7 +335,7 @@ export function WalletIdentityPanel() {
         </div>
       ) : null}
 
-      {identity ? <IdentityCard identity={identity} /> : null}
+      {identity ? <IdentityCard identity={identity} mintDecimals={mintDecimals} /> : null}
     </section>
   );
 }
@@ -362,7 +395,13 @@ function PhaseTracker({ phase }: { phase: Phase }) {
   );
 }
 
-function AirdropBanner({ identity }: { identity: IdentityState }) {
+function AirdropBanner({
+  identity,
+  mintDecimals,
+}: {
+  identity: IdentityState;
+  mintDecimals: { base: number; quote: number };
+}) {
   if (identity.airdropError) {
     return (
       <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -383,8 +422,8 @@ function AirdropBanner({ identity }: { identity: IdentityState }) {
       <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
         <span className="font-semibold">Demo airdrop confirmed.</span>{" "}
         <span className="text-[11px]">
-          BASE +{identity.airdrop.baseAmount} · QUOTE +
-          {identity.airdrop.quoteAmount} (raw u64 units) ·{" "}
+          BASE +{formatAirdropAtoms(identity.airdrop.baseAmount, mintDecimals.base)} · QUOTE +
+          {formatAirdropAtoms(identity.airdrop.quoteAmount, mintDecimals.quote)} ·{" "}
           <a
             className="underline hover:text-emerald-700"
             target="_blank"
@@ -400,7 +439,13 @@ function AirdropBanner({ identity }: { identity: IdentityState }) {
   return null;
 }
 
-function IdentityCard({ identity }: { identity: IdentityState }) {
+function IdentityCard({
+  identity,
+  mintDecimals,
+}: {
+  identity: IdentityState;
+  mintDecimals: { base: number; quote: number };
+}) {
   const rows: Array<[string, string, string?]> = [
     ["owner pubkey", identity.ownerPubkey],
     [
@@ -450,7 +495,7 @@ function IdentityCard({ identity }: { identity: IdentityState }) {
           {identity.proof.durationMs}ms
         </div>
       </div>
-      <AirdropBanner identity={identity} />
+      <AirdropBanner identity={identity} mintDecimals={mintDecimals} />
       <div className="grid grid-cols-1 gap-2 text-xs">
         {rows.map(([label, value, hint]) => (
           <div
