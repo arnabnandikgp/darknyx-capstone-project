@@ -96,8 +96,7 @@ export function FlowDiagram() {
         <div className="mt-10 flex flex-wrap items-end justify-between gap-6">
           <p className="max-w-xl text-[13px] text-nyx-fog">
             Want to see every PDA, every cryptographic primitive, and every
-            instruction the on-chain programs accept? Open the architecture
-            page — it pulls from <span className="font-mono text-nyx-chalk">docs/ARCHITECTURE.md</span>.
+            instruction the on-chain programs accept?
           </p>
           <a
             href="/architecture"
