@@ -331,7 +331,7 @@ export async function POST(req: Request) {
     const erSig = await sendAndConfirmTransaction(er, new Transaction().add(makerIx), [maker], {
       commitment: "confirmed",
     });
-    signatures.push({ label: "counterparty submit_order (ER)", signature: erSig, cluster: "er" });
+    signatures.push({ label: "counterparty submit_order (PER)", signature: erSig, cluster: "er" });
 
     const [userPda] = pendingOrderPda(
       programs.meProgramId,

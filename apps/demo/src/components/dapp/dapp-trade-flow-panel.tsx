@@ -34,6 +34,21 @@ interface ReceiptLine {
   cluster: "l1" | "er";
 }
 
+interface MintBalance {
+  ata: string;
+  exists: boolean;
+  amount: string;
+  mintBase58: string;
+  decimals: number;
+}
+
+interface BalancesResponse {
+  ok: boolean;
+  error?: string;
+  base?: MintBalance;
+  quote?: MintBalance;
+}
+
 function txUrl(sig: string) {
   return `https://explorer.solana.com/tx/${sig}?cluster=devnet`;
 }
@@ -102,6 +117,38 @@ export function DappTradeFlowPanel() {
     };
   }, []);
 
+  const [depositNote, setDepositNote] = useState<{
+    commitmentHex: string;
+    amount: string;
+  } | null>(null);
+  const orderCtxRef = useRef<{ orderIdHex: string; expirySlot: string } | null>(null);
+  const [receipt, setReceipt] = useState<ReceiptLine[]>([]);
+  const [balances, setBalances] = useState<BalancesResponse | null>(null);
+
+  const fetchBalances = useCallback(async (ownerPubkeyBase58: string) => {
+    try {
+      const res = await fetch("/api/dapp/balances", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ownerPubkeyBase58 }),
+      });
+      const json = (await res.json()) as BalancesResponse;
+      setBalances(json);
+    } catch (e) {
+      setBalances({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  const refresh = useCallback(() => {
+    const s = readDappSession();
+    setSession(s);
+    if (s) {
+      void fetchBalances(s.ownerPubkeyBase58);
+    } else {
+      setBalances(null);
+    }
+  }, [fetchBalances]);
+
   useEffect(() => {
     // SSR renders this component with a null session; hydration on the client
     // then reads sessionStorage and re-renders. setState here is intentional —
@@ -110,17 +157,11 @@ export function DappTradeFlowPanel() {
     // until they touch the form.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSession(readDappSession());
-  }, []);
-  const [depositNote, setDepositNote] = useState<{
-    commitmentHex: string;
-    amount: string;
-  } | null>(null);
-  const orderCtxRef = useRef<{ orderIdHex: string; expirySlot: string } | null>(null);
-  const [receipt, setReceipt] = useState<ReceiptLine[]>([]);
-
-  const refreshSession = useCallback(() => {
-    setSession(readDappSession());
-  }, []);
+    const s = readDappSession();
+    if (s) {
+      void fetchBalances(s.ownerPubkeyBase58);
+    }
+  }, [fetchBalances]);
 
   const appendReceipt = (lines: ReceiptLine[]) => {
     setReceipt((r) => [...r, ...lines]);
@@ -240,6 +281,7 @@ export function DappTradeFlowPanel() {
     });
     setStep("deposited");
     setBusy(false);
+    void fetchBalances(s.ownerPubkeyBase58);
   };
 
   const runSubmitOrderEr = async () => {
@@ -302,7 +344,7 @@ export function DappTradeFlowPanel() {
       preflightCommitment: "confirmed",
     });
     await er.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
-    appendReceipt([{ label: "submit_order bid (ER)", signature: sig, cluster: "er" }]);
+    appendReceipt([{ label: "submit_order bid (PER)", signature: sig, cluster: "er" }]);
     setStep("order_er");
     setBusy(false);
   };
@@ -368,11 +410,12 @@ export function DappTradeFlowPanel() {
     }
     setStep("matched");
     setBusy(false);
+    void fetchBalances(s.ownerPubkeyBase58);
   };
 
   const nextAction = async () => {
     try {
-      refreshSession();
+      refresh();
       if (!readDappSession()) return;
       if (step === "idle") await runRegister();
       else if (step === "registered") await runInitSlot();
@@ -392,11 +435,11 @@ export function DappTradeFlowPanel() {
       : step === "idle"
         ? "Register wallet on-chain"
         : step === "registered"
-          ? "Init + delegate ER slot"
+          ? "Init + delegate PER slot"
           : step === "slot_ready"
             ? "Deposit quote collateral"
             : step === "deposited"
-              ? "Submit bid on ER"
+              ? "Submit bid on PER"
               : step === "order_er"
                 ? "Match privately & settle on L1"
                 : "Continue";
@@ -420,13 +463,10 @@ export function DappTradeFlowPanel() {
         </div>
         <button
           type="button"
-          onClick={() => {
-            refreshSession();
-            setSession(readDappSession());
-          }}
+          onClick={refresh}
           className="rounded-md border border-white/12 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-nyx-chalk hover:bg-white/[0.06]"
         >
-          Refresh session
+          Refresh
         </button>
       </div>
 
@@ -434,6 +474,40 @@ export function DappTradeFlowPanel() {
         <p className="text-sm text-nyx-fog">Finish the identity step above — session will appear here.</p>
       ) : (
         <>
+          <div className="mb-3 grid grid-cols-1 gap-2 text-[11px] text-nyx-chalk sm:grid-cols-2">
+            <div className="rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2">
+              <div className="font-mono uppercase tracking-wide text-[10px] text-nyx-slate">
+                BASE balance
+              </div>
+              <div className="mt-0.5 font-mono">
+                {balances?.base
+                  ? `${formatAtoms(balances.base.amount, balances.base.decimals)} BASE`
+                  : "?"}
+                {balances?.base && !balances.base.exists ? (
+                  <span className="ml-2 text-nyx-signal-amber">(no ATA yet)</span>
+                ) : null}
+              </div>
+            </div>
+            <div className="rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2">
+              <div className="font-mono uppercase tracking-wide text-[10px] text-nyx-slate">
+                QUOTE balance
+              </div>
+              <div className="mt-0.5 font-mono">
+                {balances?.quote
+                  ? `${formatAtoms(balances.quote.amount, balances.quote.decimals)} QUOTE`
+                  : "?"}
+                {balances?.quote && !balances.quote.exists ? (
+                  <span className="ml-2 text-nyx-signal-amber">(no ATA yet)</span>
+                ) : null}
+              </div>
+            </div>
+            {balances && !balances.ok ? (
+              <div className="sm:col-span-2 rounded-md border border-nyx-signal-red/35 bg-nyx-signal-red/10 px-3 py-2 text-nyx-signal-red">
+                balance lookup failed: {balances.error}
+              </div>
+            ) : null}
+          </div>
+
           <div className="mb-4 flex flex-wrap items-end gap-3">
             <label className="text-xs text-nyx-fog">
               Base size (BASE)
@@ -459,7 +533,7 @@ export function DappTradeFlowPanel() {
 
           {slotIdx != null ? (
             <p className="mb-2 text-xs text-nyx-fog">
-              ER slot: <span className="font-mono font-semibold">{slotIdx}</span>
+              PER slot: <span className="font-mono font-semibold">{slotIdx}</span>
             </p>
           ) : null}
 
@@ -502,7 +576,9 @@ export function DappTradeFlowPanel() {
                         >
                           {r.signature.slice(0, 10)}…
                         </a>{" "}
-                        <span className="text-nyx-slate">({r.cluster})</span>
+                        <span className="text-nyx-slate">
+                          ({r.cluster === "er" ? "PER" : "L1"})
+                        </span>
                       </>
                     ) : (
                       <span className="ml-2 text-nyx-slate">(no tx)</span>

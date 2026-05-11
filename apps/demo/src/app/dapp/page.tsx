@@ -121,8 +121,8 @@ export default function DappPage() {
           {connected ? (
             <>
               <WalletIdentityPanel />
-              <PrivateDepositWithdrawPanel />
               <DappTradeFlowPanel />
+              <PrivateDepositWithdrawPanel />
               {/* <TradeBaseWithdrawPanel /> — temporarily hidden, see import comment above. */}
             </>
           ) : null}
