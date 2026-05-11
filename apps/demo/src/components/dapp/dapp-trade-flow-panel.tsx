@@ -49,7 +49,7 @@ export function DappTradeFlowPanel() {
   const [slotIdx, setSlotIdx] = useState<number | null>(null);
   /** Human BASE size; converted with mint decimals from `/api/dapp/token-meta`. */
   const [baseAmount, setBaseAmount] = useState(
-    process.env.NEXT_PUBLIC_DEMO_BASE_HUMAN ?? "0.1",
+    process.env.NEXT_PUBLIC_DEMO_BASE_HUMAN ?? "1",
   );
   const [depositNonce] = useState(() => (BigInt(Date.now()) + 333_333n).toString());
   const [tokenMeta, setTokenMeta] = useState<TokenMeta | null>(null);
@@ -407,7 +407,7 @@ export function DappTradeFlowPanel() {
         <div>
           <h2 className="text-lg font-semibold text-nyx-chalk">Trade on devnet</h2>
           <p className="mt-1 max-w-xl text-xs text-nyx-fog">
-            Place a shielded bid that&rsquo;s matched inside the MagicBlock Ephemeral
+            Place a shielded bid that&rsquo;s matched inside the MagicBlock Private Ephemeral
             Rollup. Your order&rsquo;s size, side, and price-limit stay encrypted on
             the rollup; only a TEE-signed match result lands on L1, where the vault
             writes fresh shielded notes for buyer and seller. The demo pegs{" "}

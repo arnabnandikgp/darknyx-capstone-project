@@ -10,7 +10,6 @@ import { NyxNav } from "@/components/brand/nyx-nav";
 import { ProverSmokeTestPanel } from "@/components/dapp/prover-smoke-test-panel";
 import { DappTradeFlowPanel } from "@/components/dapp/dapp-trade-flow-panel";
 import { PrivateDepositWithdrawPanel } from "@/components/dapp/private-deposit-withdraw-panel";
-import { sanitizeRpcUrl } from "@/lib/dapp/sanitize-url";
 // TODO(post-trade BASE withdraw): re-enable once we have an indexer (or in-process
 // snapshot) so the VALID_SPEND witness is stable on a busy devnet. Today the
 // Merkle reconstruction races other vault txs and the "Merkle witness root !=
@@ -18,15 +17,11 @@ import { sanitizeRpcUrl } from "@/lib/dapp/sanitize-url";
 // import { TradeBaseWithdrawPanel } from "@/components/dapp/trade-base-withdraw-panel";
 import { WalletIdentityPanel } from "@/components/dapp/wallet-identity-panel";
 
-const DEVNET_EXPLORER = (addr: string) =>
-  `https://explorer.solana.com/address/${addr}?cluster=devnet`;
-
 export default function DappPage() {
   const { connection } = useConnection();
   const { publicKey, connected, connecting } = useWallet();
 
   const [solBalance, setSolBalance] = useState<number | null>(null);
-  const [endpoint, setEndpoint] = useState<string>("");
   // `WalletMultiButton` from @solana/wallet-adapter-react-ui ships different
   // DOM on server vs. client (the `<i>` icon is added post-mount), causing a
   // React hydration warning. Defer rendering until after the first client
@@ -37,13 +32,6 @@ export default function DappPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
-
-  useEffect(() => {
-    // Endpoint comes from the wallet-adapter context which only resolves
-    // client-side, so reading it during SSR would be useless.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setEndpoint(connection.rpcEndpoint);
-  }, [connection]);
 
   useEffect(() => {
     if (!publicKey) {
@@ -89,6 +77,13 @@ export default function DappPage() {
                   order, and finally withdraw your fill — every step gives you
                   an explorer link.
                 </p>
+                <div className="mt-5 max-w-[220px]">
+                  <StatusPill
+                    label="balance"
+                    value={solBalance == null ? "—" : `${solBalance.toFixed(4)} SOL`}
+                    mono
+                  />
+                </div>
               </div>
               <div className="flex flex-col items-end gap-2">
                 <div className="flex items-center gap-2">
@@ -117,42 +112,6 @@ export default function DappPage() {
                     : "wallet not connected"}
                 </span>
               </div>
-            </div>
-
-            <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
-              <StatusPill
-                label="rpc"
-                // Show only the hostname — never the query string, which is
-                // where API keys (`?api-key=...`) typically live.
-                value={sanitizeRpcUrl(endpoint)}
-                mono
-              />
-              <StatusPill
-                label="wallet"
-                value={
-                  publicKey ? (
-                    <a
-                      className="hover:underline"
-                      href={DEVNET_EXPLORER(publicKey.toBase58())}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {publicKey.toBase58().slice(0, 8)}…
-                      {publicKey.toBase58().slice(-6)}
-                    </a>
-                  ) : connecting ? (
-                    "connecting…"
-                  ) : (
-                    "not connected"
-                  )
-                }
-                mono
-              />
-              <StatusPill
-                label="balance"
-                value={solBalance == null ? "—" : `${solBalance.toFixed(4)} SOL`}
-                mono
-              />
             </div>
           </div>
         </section>
