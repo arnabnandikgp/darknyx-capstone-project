@@ -22,12 +22,28 @@ import { verifyPhantomSeedSignature } from "@/lib/dapp/phantom-verify";
 
 export const runtime = "nodejs";
 
+const DELEGATION_PROGRAM_ID = new PublicKey(
+  "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh",
+);
+
 /** Mirrors on-chain `MAX_PENDING_SLOTS_PER_USER` in pending_order.rs. */
 const MAX_PENDING_SLOTS_PER_USER = 4;
 
 /** Byte layout for PendingOrder.status (after 8B disc + 32 trading_key + 32 market). */
 const PENDING_ORDER_STATUS_OFFSET = 8 + 32 + 32;
 const PENDING_STATUS_EMPTY = 0;
+const PENDING_STATUS_MATCHED = 2;
+const PENDING_STATUS_EXPIRED = 3;
+const PENDING_STATUS_CANCELLED = 4;
+
+function isReusablePendingOrderStatus(status: number): boolean {
+  return (
+    status === PENDING_STATUS_EMPTY ||
+    status === PENDING_STATUS_MATCHED ||
+    status === PENDING_STATUS_EXPIRED ||
+    status === PENDING_STATUS_CANCELLED
+  );
+}
 
 interface SlotPick {
   slotIdx: number;
@@ -39,32 +55,39 @@ interface SlotPick {
  * Pick a usable slot under the on-chain `[0, MAX_PENDING_SLOTS_PER_USER)` cap.
  * Preference order:
  *   1. first slot whose PDA doesn't exist (fresh init+delegate)
- *   2. first existing slot with `status == EMPTY` (e.g. matched-and-cleared) — re-use as-is
+ *   2. first existing slot in any terminal reusable state
+ *      (Empty / Matched / Expired / Cancelled) — re-use as-is
  *   3. otherwise: throw with a clear message (all 4 slots are still occupied)
  */
 async function chooseFreshSlot(
   l1: import("@solana/web3.js").Connection,
+  er: import("@solana/web3.js").Connection,
   meProgramId: PublicKey,
   market: PublicKey,
   tradingKey: PublicKey,
 ): Promise<SlotPick> {
-  let firstEmpty: number | null = null;
+  let firstReusable: number | null = null;
   for (let idx = 0; idx < MAX_PENDING_SLOTS_PER_USER; idx++) {
     const [pda] = pendingOrderPda(meProgramId, market, tradingKey, idx);
-    const info = await l1.getAccountInfo(pda, "confirmed");
-    if (!info) return { slotIdx: idx, needsInit: true };
+    const l1info = await l1.getAccountInfo(pda, "confirmed");
+    if (!l1info) return { slotIdx: idx, needsInit: true };
+    if (firstReusable != null) continue;
+    const isDelegated = l1info.owner.equals(DELEGATION_PROGRAM_ID);
+    const data = isDelegated
+      ? ((await er.getAccountInfo(pda, "confirmed"))?.data ?? null)
+      : l1info.data;
     if (
-      firstEmpty == null &&
-      info.data.length > PENDING_ORDER_STATUS_OFFSET &&
-      info.data[PENDING_ORDER_STATUS_OFFSET] === PENDING_STATUS_EMPTY
+      data &&
+      data.length > PENDING_ORDER_STATUS_OFFSET &&
+      isReusablePendingOrderStatus(data[PENDING_ORDER_STATUS_OFFSET] ?? -1)
     ) {
-      firstEmpty = idx;
+      firstReusable = idx;
     }
   }
-  if (firstEmpty != null) return { slotIdx: firstEmpty, needsInit: false };
+  if (firstReusable != null) return { slotIdx: firstReusable, needsInit: false };
   throw new Error(
-    `All ${MAX_PENDING_SLOTS_PER_USER} pending-order slots for this trading key are occupied with non-Empty status. ` +
-      "Wait for an outstanding order to fill / expire / be cancelled, or use a fresh wallet for the demo.",
+    `All ${MAX_PENDING_SLOTS_PER_USER} pending-order slots for this trading key still have live Pending orders. ` +
+      "Wait for an outstanding order to settle or use a fresh wallet for the demo.",
   );
 }
 
@@ -96,9 +119,6 @@ async function ensureSlotDelegated(
     info = await l1.getAccountInfo(slotPda, "confirmed");
   }
   if (!info) throw new Error("pending order slot missing after init");
-  const DELEGATION_PROGRAM_ID = new PublicKey(
-    "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh",
-  );
   if (info.owner.equals(DELEGATION_PROGRAM_ID)) return;
   await sendAndConfirmTransaction(
     l1,
@@ -142,13 +162,13 @@ export async function POST(req: Request) {
 
     const repoRoot = resolveRepoRoot();
     const cfg = loadDemoE2eConfig(repoRoot);
-    const { l1 } = getDemoConnections(cfg);
+    const { l1, er } = getDemoConnections(cfg);
     const { meProgramId, market } = parseDemoPrograms(cfg);
     const { funder } = loadDemoKeyring(repoRoot);
 
     await ensureMarketDelegatedOnL1(l1, meProgramId, market, funder);
 
-    const pick = await chooseFreshSlot(l1, meProgramId, market, trading.publicKey);
+    const pick = await chooseFreshSlot(l1, er, meProgramId, market, trading.publicKey);
     await topUpSol(l1, funder, trading.publicKey);
     await ensureSlotDelegated(l1, meProgramId, market, funder, trading, pick.slotIdx, pick.needsInit);
 

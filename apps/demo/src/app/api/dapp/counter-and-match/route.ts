@@ -46,6 +46,18 @@ const DELEGATION_PROGRAM_ID = new PublicKey(
 const MAX_PENDING_SLOTS_PER_USER = 4;
 const PENDING_ORDER_STATUS_OFFSET = 8 + 32 + 32;
 const PENDING_STATUS_EMPTY = 0;
+const PENDING_STATUS_MATCHED = 2;
+const PENDING_STATUS_EXPIRED = 3;
+const PENDING_STATUS_CANCELLED = 4;
+
+function isReusablePendingOrderStatus(status: number): boolean {
+  return (
+    status === PENDING_STATUS_EMPTY ||
+    status === PENDING_STATUS_MATCHED ||
+    status === PENDING_STATUS_EXPIRED ||
+    status === PENDING_STATUS_CANCELLED
+  );
+}
 
 interface SlotPick {
   slotIdx: number;
@@ -57,9 +69,9 @@ interface SlotPick {
  * Pick a usable maker slot under the on-chain `[0, MAX_PENDING_SLOTS_PER_USER)` cap.
  *
  * Once a slot is delegated to MagicBlock, the L1 view of its `status` is frozen at
- * the post-init `Empty` snapshot — the live status (Pending after a previous
- * `submit_order`, Empty after a successful `run_batch`, …) lives on the ER.
- * Reusing a slot that is `Empty` on L1 but still `Pending` on the ER would land
+ * the post-init snapshot — the live status (Pending after a previous
+ * `submit_order`, Matched after a successful `run_batch`, …) lives on the ER.
+ * Reusing a slot that looks terminal on L1 but is still `Pending` on the ER would land
  * a `MatchingError::SlotAlreadyOccupied (0x1793)` from the program's
  * `submit_order` reusability check.
  */
@@ -70,12 +82,12 @@ async function chooseFreshSlot(
   market: PublicKey,
   tradingKey: PublicKey,
 ): Promise<SlotPick> {
-  let firstEmpty: number | null = null;
+  let firstReusable: number | null = null;
   for (let idx = 0; idx < MAX_PENDING_SLOTS_PER_USER; idx++) {
     const [pda] = pendingOrderPda(meProgramId, market, tradingKey, idx);
     const l1info = await l1.getAccountInfo(pda, "confirmed");
     if (!l1info) return { slotIdx: idx, needsInit: true };
-    if (firstEmpty != null) continue;
+    if (firstReusable != null) continue;
     const isDelegated = l1info.owner.equals(DELEGATION_PROGRAM_ID);
     let data: Buffer | Uint8Array | null = null;
     if (isDelegated) {
@@ -88,12 +100,12 @@ async function chooseFreshSlot(
     if (
       data &&
       data.length > PENDING_ORDER_STATUS_OFFSET &&
-      data[PENDING_ORDER_STATUS_OFFSET] === PENDING_STATUS_EMPTY
+      isReusablePendingOrderStatus(data[PENDING_ORDER_STATUS_OFFSET] ?? -1)
     ) {
-      firstEmpty = idx;
+      firstReusable = idx;
     }
   }
-  if (firstEmpty != null) return { slotIdx: firstEmpty, needsInit: false };
+  if (firstReusable != null) return { slotIdx: firstReusable, needsInit: false };
   throw new Error(
     `Maker has all ${MAX_PENDING_SLOTS_PER_USER} pending-order slots with live orders. ` +
       "Wait for outstanding maker orders to clear or rotate the demo maker keypair.",
