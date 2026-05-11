@@ -6,12 +6,12 @@ interface Pill {
 const STACK: Pill[] = [
   { label: "Solana", detail: "L1 custody + ZK verifier" },
   { label: "Anchor 0.32", detail: "vault + matching engine" },
-  { label: "MagicBlock ER", detail: "delegated order PDAs" },
+  { label: "MagicBlock PER", detail: "delegated order PDAs" },
   { label: "Groth16 / BN254", detail: "VALID_WALLET_CREATE · VALID_SPEND" },
   { label: "Poseidon2", detail: "depth-20 incremental Merkle" },
   { label: "Ed25519 precompile", detail: "TEE-signed settlement" },
   { label: "snarkjs", detail: "browser-side prover" },
-  { label: "@nyx/sdk", detail: "no-Anchor-runtime client" },
+  { label: "@darknyx/sdk", detail: "no-Anchor-runtime client" },
 ];
 
 export function StackStrip() {

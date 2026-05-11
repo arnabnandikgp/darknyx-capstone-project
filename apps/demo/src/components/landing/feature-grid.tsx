@@ -15,7 +15,7 @@ const FEATURES: Feature[] = [
   {
     eyebrow: "02 · Verifiable settlement",
     title: "Every fill is a Groth16 proof.",
-    body: "Withdrawals require a VALID_SPEND zk-SNARK proving you own a leaf in the vault's Merkle tree. The on-chain verifier accepts only fresh roots from a 32-deep ring buffer — no replay, no impersonation.",
+    body: "Withdrawals require a VALID_SPEND zk-SNARK proving you own a leaf in the vault's Merkle tree.",
     icon: "shield",
   },
   {
