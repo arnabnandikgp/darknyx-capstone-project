@@ -302,15 +302,15 @@ export function PrivateDepositWithdrawPanel() {
           : "Done";
 
   return (
-    <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+    <section className="rounded-2xl border border-white/[0.08] bg-nyx-graphite p-6 shadow-sm shadow-black/20">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-900">Private deposit / withdraw</h2>
-          <p className="mt-1 max-w-xl text-xs text-zinc-600">
+          <h2 className="text-lg font-semibold text-nyx-chalk">Private deposit / withdraw</h2>
+          <p className="mt-1 max-w-xl text-xs text-nyx-fog">
             End-to-end privacy primitive. A deposit hashes a fresh shielded note — a
             Poseidon commitment over <span className="font-mono">(token, amount, owner, blinding)</span> —
             and inserts it into the on-chain Merkle tree. To withdraw, your browser
-            proves <code className="mx-1 rounded bg-zinc-100 px-1">VALID_SPEND</code> in
+            proves <code className="mx-1 rounded bg-white/[0.06] px-1 text-nyx-chalk">VALID_SPEND</code> in
             Groth16: it reveals a nullifier (so the note can&rsquo;t be double-spent) and
             asserts a Merkle inclusion witness for that commitment — without disclosing
             which leaf is yours, who deposited it, or how much it&rsquo;s worth.
@@ -322,14 +322,14 @@ export function PrivateDepositWithdrawPanel() {
           <button
             type="button"
             onClick={refresh}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+            className="rounded-md border border-white/12 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-nyx-chalk hover:bg-white/[0.06]"
           >
             Refresh
           </button>
           <button
             type="button"
             onClick={reset}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+            className="rounded-md border border-white/12 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-nyx-chalk hover:bg-white/[0.06]"
           >
             Reset
           </button>
@@ -337,12 +337,12 @@ export function PrivateDepositWithdrawPanel() {
       </div>
 
       {!s0 ? (
-        <p className="text-sm text-zinc-600">Finish the identity step above — session will appear here.</p>
+        <p className="text-sm text-nyx-fog">Finish the identity step above — session will appear here.</p>
       ) : (
         <>
-          <div className="mb-3 grid grid-cols-1 gap-2 text-[11px] text-zinc-700 sm:grid-cols-2">
-            <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
-              <div className="font-mono uppercase tracking-wide text-[10px] text-zinc-500">
+          <div className="mb-3 grid grid-cols-1 gap-2 text-[11px] text-nyx-chalk sm:grid-cols-2">
+            <div className="rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2">
+              <div className="font-mono uppercase tracking-wide text-[10px] text-nyx-slate">
                 BASE balance
               </div>
               <div className="mt-0.5 font-mono">
@@ -350,12 +350,12 @@ export function PrivateDepositWithdrawPanel() {
                   ? `${formatAtoms(balances.base.amount, balances.base.decimals)} BASE`
                   : "?"}
                 {balances?.base && !balances.base.exists ? (
-                  <span className="ml-2 text-amber-700">(no ATA yet)</span>
+                  <span className="ml-2 text-nyx-signal-amber">(no ATA yet)</span>
                 ) : null}
               </div>
             </div>
-            <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
-              <div className="font-mono uppercase tracking-wide text-[10px] text-zinc-500">
+            <div className="rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2">
+              <div className="font-mono uppercase tracking-wide text-[10px] text-nyx-slate">
                 QUOTE balance
               </div>
               <div className="mt-0.5 font-mono">
@@ -363,22 +363,22 @@ export function PrivateDepositWithdrawPanel() {
                   ? `${formatAtoms(balances.quote.amount, balances.quote.decimals)} QUOTE`
                   : "?"}
                 {balances?.quote && !balances.quote.exists ? (
-                  <span className="ml-2 text-amber-700">(no ATA yet)</span>
+                  <span className="ml-2 text-nyx-signal-amber">(no ATA yet)</span>
                 ) : null}
               </div>
             </div>
             {balances && !balances.ok ? (
-              <div className="sm:col-span-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-800">
+              <div className="sm:col-span-2 rounded-md border border-nyx-signal-red/35 bg-nyx-signal-red/10 px-3 py-2 text-nyx-signal-red">
                 balance lookup failed: {balances.error}
               </div>
             ) : null}
           </div>
 
           <div className="mb-4 flex flex-wrap items-end gap-3">
-            <label className="text-xs text-zinc-600">
+            <label className="text-xs text-nyx-fog">
               Side
               <select
-                className="ml-2 rounded border border-zinc-300 px-2 py-1 font-mono text-sm"
+                className="ml-2 rounded border border-white/12 bg-white/[0.03] px-2 py-1 font-mono text-sm text-nyx-chalk"
                 value={side}
                 onChange={(e) => setSide(e.target.value as "base" | "quote")}
                 disabled={step !== "idle"}
@@ -387,10 +387,10 @@ export function PrivateDepositWithdrawPanel() {
                 <option value="base">BASE</option>
               </select>
             </label>
-            <label className="text-xs text-zinc-600">
+            <label className="text-xs text-nyx-fog">
               Amount
               <input
-                className="ml-2 w-32 rounded border border-zinc-300 px-2 py-1 font-mono text-sm"
+                className="ml-2 w-32 rounded border border-white/12 bg-white/[0.03] px-2 py-1 font-mono text-sm text-nyx-chalk"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 disabled={step !== "idle"}
@@ -399,18 +399,18 @@ export function PrivateDepositWithdrawPanel() {
           </div>
 
           {tracking ? (
-            <div className="mb-3 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] text-zinc-700">
+            <div className="mb-3 rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2 text-[11px] text-nyx-chalk">
               <div>
                 leaf <span className="font-mono">{tracking.leafIndex}</span> · note commitment
               </div>
-              <div className="mt-0.5 truncate font-mono text-zinc-500" title={tracking.commitmentHex}>
+              <div className="mt-0.5 truncate font-mono text-nyx-slate" title={tracking.commitmentHex}>
                 {tracking.commitmentHex.slice(0, 32)}…{tracking.commitmentHex.slice(-12)}
               </div>
             </div>
           ) : null}
 
           {proverMs != null ? (
-            <p className="mb-2 text-[11px] text-zinc-500">
+            <p className="mb-2 text-[11px] text-nyx-slate">
               VALID_SPEND proof generated in <span className="font-mono">{proverMs} ms</span> (browser)
             </p>
           ) : null}
@@ -425,13 +425,13 @@ export function PrivateDepositWithdrawPanel() {
           </button>
 
           {error ? (
-            <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+            <div className="mt-3 rounded-md border border-nyx-signal-red/35 bg-nyx-signal-red/10 px-3 py-2 text-xs text-nyx-signal-red">
               {error}
             </div>
           ) : null}
 
           {step === "withdrawn" ? (
-            <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+            <div className="mt-4 rounded-md border border-nyx-signal-green/35 bg-nyx-signal-green/10 px-3 py-2 text-xs text-nyx-signal-green">
               <span className="font-semibold">Withdraw confirmed.</span> Your shielded note has been
               spent — the on-chain nullifier is now recorded, so this note can never be re-spent or
               linked back to its deposit.
@@ -440,13 +440,13 @@ export function PrivateDepositWithdrawPanel() {
 
           {receipt.length > 0 ? (
             <div className="mt-5">
-              <h3 className="text-sm font-semibold text-zinc-900">Receipt</h3>
+              <h3 className="text-sm font-semibold text-nyx-chalk">Receipt</h3>
               <ul className="mt-2 space-y-1 text-xs">
                 {receipt.map((r, i) => (
-                  <li key={`${r.signature}-${i}`} className="font-mono text-zinc-700">
-                    <span className="text-zinc-500">{r.label}</span> ·{" "}
+                  <li key={`${r.signature}-${i}`} className="font-mono text-nyx-chalk">
+                    <span className="text-nyx-slate">{r.label}</span> ·{" "}
                     <a
-                      className="text-blue-600 hover:underline"
+                      className="text-nyx-accent hover:underline"
                       href={txUrl(r.signature)}
                       target="_blank"
                       rel="noreferrer"

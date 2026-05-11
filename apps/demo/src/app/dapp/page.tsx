@@ -66,26 +66,24 @@ export default function DappPage() {
   }, [publicKey, connection]);
 
   return (
-    <div
-      data-theme="chalk"
-      className="flex min-h-screen flex-1 flex-col bg-nyx-chalk text-nyx-ink"
-    >
-      <NyxNav tone="chalk" active="dapp" launchHref={null} />
+    <div className="flex min-h-screen flex-1 flex-col bg-nyx-ink text-nyx-chalk">
+      <NyxNav tone="ink" active="dapp" launchHref={null} />
 
       <main className="flex-1">
         {/* Banner header — branded, slim, with status pills */}
-        <section className="relative isolate border-b border-black/[0.06]">
-          <div className="nyx-grid-light absolute inset-0 -z-10 opacity-50" />
+        <section className="relative isolate overflow-hidden border-b border-white/[0.06]">
+          <div className="nyx-aurora" />
+          <div className="nyx-grid absolute inset-0 -z-10 opacity-60" />
           <div className="mx-auto max-w-6xl px-5 py-10 sm:px-7 sm:py-12">
             <div className="flex flex-wrap items-start justify-between gap-5">
               <div className="max-w-2xl">
-                <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-nyx-slate">
+                <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-nyx-fog">
                   Live dapp · devnet
                 </span>
                 <h1 className="nyx-display mt-2 text-[34px] leading-[1.05] sm:text-[42px]">
                   Connect, deposit, trade — privately.
                 </h1>
-                <p className="mt-3 max-w-xl text-[14px] text-nyx-slate">
+                <p className="mt-3 max-w-xl text-[14px] text-nyx-fog">
                   Phantom wallet on Solana devnet. Derive darkpool keys, airdrop
                   test tokens, deposit shielded notes, place an ER-private
                   order, and finally withdraw your fill — every step gives you
@@ -103,13 +101,13 @@ export default function DappPage() {
                     <button
                       type="button"
                       disabled
-                      className="rounded-md bg-nyx-ink/15 px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.12em] text-nyx-slate"
+                      className="rounded-md border border-white/10 bg-white/5 px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.12em] text-nyx-fog"
                     >
                       Loading wallet…
                     </button>
                   )}
                 </div>
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-nyx-slate">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-nyx-fog">
                   {!mounted
                     ? "initializing…"
                     : connecting
@@ -173,15 +171,15 @@ export default function DappPage() {
           <ProverSmokeTestPanel />
 
           {!connected ? (
-            <section className="rounded-md border border-dashed border-black/15 bg-white/70 p-6 text-[13px] text-nyx-slate">
-              <h2 className="text-[16px] font-semibold text-nyx-ink">Get started</h2>
+            <section className="rounded-md border border-dashed border-white/12 bg-white/[0.03] p-6 text-[13px] text-nyx-fog">
+              <h2 className="text-[16px] font-semibold text-nyx-chalk">Get started</h2>
               <p className="mt-2">
                 This page only works on Solana <span className="font-semibold">devnet</span>.
                 Switch your Phantom wallet to devnet, then click <em>Select Wallet</em> above.
                 Once connected we&rsquo;ll guide you through the full deposit → trade →
                 withdraw flow.
               </p>
-              <ol className="mt-3 list-inside list-decimal space-y-1 text-nyx-ink/80">
+              <ol className="mt-3 list-inside list-decimal space-y-1 text-nyx-chalk/85">
                 <li>Connect a Phantom wallet on devnet.</li>
                 <li>Sign a fixed message — your darkpool keys are derived from that signature alone.</li>
                 <li>Register your Poseidon wallet commitment on-chain (verified with a Groth16 proof).</li>
@@ -194,7 +192,7 @@ export default function DappPage() {
         </section>
       </main>
 
-      <NyxFooter tone="chalk" />
+      <NyxFooter tone="ink" />
     </div>
   );
 }
@@ -209,12 +207,12 @@ function StatusPill({
   mono?: boolean;
 }) {
   return (
-    <div className="rounded-md border border-black/[0.07] bg-white/80 px-3 py-2">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-nyx-slate">
+    <div className="rounded-md border border-white/[0.08] bg-white/[0.04] px-3 py-2 backdrop-blur-sm">
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-nyx-fog">
         {label}
       </div>
       <div
-        className={`mt-1 truncate text-[13px] text-nyx-ink ${mono ? "font-mono" : ""}`}
+        className={`mt-1 truncate text-[13px] text-nyx-chalk ${mono ? "font-mono" : ""}`}
       >
         {value}
       </div>

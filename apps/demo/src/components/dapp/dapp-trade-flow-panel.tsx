@@ -402,16 +402,16 @@ export function DappTradeFlowPanel() {
                 : "Continue";
 
   return (
-    <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+    <section className="rounded-2xl border border-white/[0.08] bg-nyx-graphite p-6 shadow-sm shadow-black/20">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-900">Trade on devnet</h2>
-          <p className="mt-1 max-w-xl text-xs text-zinc-600">
+          <h2 className="text-lg font-semibold text-nyx-chalk">Trade on devnet</h2>
+          <p className="mt-1 max-w-xl text-xs text-nyx-fog">
             Place a shielded bid that&rsquo;s matched inside the MagicBlock Ephemeral
             Rollup. Your order&rsquo;s size, side, and price-limit stay encrypted on
             the rollup; only a TEE-signed match result lands on L1, where the vault
             writes fresh shielded notes for buyer and seller. The demo pegs{" "}
-            <span className="font-mono font-semibold text-zinc-800">
+            <span className="font-mono font-semibold text-nyx-chalk">
               1 BASE = {humanQuotePerBase.toString()} QUOTE
             </span>{" "}
             against a mock oracle (±5% circuit breaker), so the default bid clears
@@ -424,27 +424,27 @@ export function DappTradeFlowPanel() {
             refreshSession();
             setSession(readDappSession());
           }}
-          className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+          className="rounded-md border border-white/12 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-nyx-chalk hover:bg-white/[0.06]"
         >
           Refresh session
         </button>
       </div>
 
       {!s0 ? (
-        <p className="text-sm text-zinc-600">Finish the identity step above — session will appear here.</p>
+        <p className="text-sm text-nyx-fog">Finish the identity step above — session will appear here.</p>
       ) : (
         <>
           <div className="mb-4 flex flex-wrap items-end gap-3">
-            <label className="text-xs text-zinc-600">
+            <label className="text-xs text-nyx-fog">
               Base size (BASE)
               <input
-                className="ml-2 w-28 rounded border border-zinc-300 px-2 py-1 font-mono text-sm"
+                className="ml-2 w-28 rounded border border-white/12 bg-white/[0.03] px-2 py-1 font-mono text-sm text-nyx-chalk"
                 value={baseAmount}
                 onChange={(e) => setBaseAmount(e.target.value)}
                 disabled={step !== "idle" && step !== "registered"}
               />
             </label>
-            <span className="text-xs font-mono text-zinc-500">
+            <span className="text-xs font-mono text-nyx-slate">
               {(() => {
                 try {
                   const ba = toAtoms(baseAmount || "0", baseDecimals);
@@ -458,7 +458,7 @@ export function DappTradeFlowPanel() {
           </div>
 
           {slotIdx != null ? (
-            <p className="mb-2 text-xs text-zinc-600">
+            <p className="mb-2 text-xs text-nyx-fog">
               ER slot: <span className="font-mono font-semibold">{slotIdx}</span>
             </p>
           ) : null}
@@ -473,11 +473,11 @@ export function DappTradeFlowPanel() {
           </button>
 
           {error ? (
-            <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</div>
+            <div className="mt-3 rounded-md border border-nyx-signal-red/35 bg-nyx-signal-red/10 px-3 py-2 text-xs text-nyx-signal-red">{error}</div>
           ) : null}
 
           {step === "matched" ? (
-            <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+            <div className="mt-4 rounded-md border border-nyx-signal-green/35 bg-nyx-signal-green/10 px-3 py-2 text-xs text-nyx-signal-green">
               <span className="font-semibold">Settlement complete.</span> Your BASE fill landed as a fresh shielded
               note. Withdrawing that note on-chain needs a synchronized Merkle witness — that&rsquo;s wired up to
               an indexer in the next milestone.
@@ -486,26 +486,26 @@ export function DappTradeFlowPanel() {
 
           {receipt.length > 0 ? (
             <div className="mt-5">
-              <h3 className="text-sm font-semibold text-zinc-900">Transaction receipt</h3>
+              <h3 className="text-sm font-semibold text-nyx-chalk">Transaction receipt</h3>
               <ul className="mt-2 space-y-1 text-xs">
                 {receipt.map((r, i) => (
-                  <li key={`${r.signature}-${i}`} className="font-mono text-zinc-700">
-                    <span className="text-zinc-500">{r.label}</span>
+                  <li key={`${r.signature}-${i}`} className="font-mono text-nyx-chalk">
+                    <span className="text-nyx-slate">{r.label}</span>
                     {r.signature && r.signature !== "skipped" ? (
                       <>
                         {" "}·{" "}
                         <a
-                          className="text-blue-600 hover:underline"
+                          className="text-nyx-accent hover:underline"
                           href={txUrl(r.signature)}
                           target="_blank"
                           rel="noreferrer"
                         >
                           {r.signature.slice(0, 10)}…
                         </a>{" "}
-                        <span className="text-zinc-400">({r.cluster})</span>
+                        <span className="text-nyx-slate">({r.cluster})</span>
                       </>
                     ) : (
-                      <span className="ml-2 text-zinc-400">(no tx)</span>
+                      <span className="ml-2 text-nyx-slate">(no tx)</span>
                     )}
                   </li>
                 ))}

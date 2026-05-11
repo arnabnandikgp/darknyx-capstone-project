@@ -132,15 +132,15 @@ export function ProverSmokeTestPanel() {
   };
 
   return (
-    <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+    <section className="rounded-2xl border border-white/[0.08] bg-nyx-graphite p-6 shadow-sm shadow-black/20">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-900">
+          <h2 className="text-lg font-semibold text-nyx-chalk">
             Browser ZK prover · smoke test
           </h2>
-          <p className="mt-1 max-w-xl text-xs text-zinc-600">
+          <p className="mt-1 max-w-xl text-xs text-nyx-fog">
             Stand-alone health-check for the in-browser prover. Generates a{" "}
-            <code className="rounded bg-zinc-100 px-1">VALID_WALLET_CREATE</code>{" "}
+            <code className="rounded bg-white/[0.06] px-1 text-nyx-chalk">VALID_WALLET_CREATE</code>{" "}
             Groth16 proof end-to-end (snarkjs in a Web Worker) and verifies that
             the public input it produces matches what the server independently
             computed for the same fixture. No wallet, no session — just a single
@@ -160,20 +160,20 @@ export function ProverSmokeTestPanel() {
         {steps.map((step) => (
           <li
             key={step.label}
-            className="flex items-start gap-3 rounded-md border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs"
+            className="flex items-start gap-3 rounded-md border border-white/[0.05] bg-nyx-graphite-2/55 px-3 py-2 text-xs"
           >
             <StatusBadge status={step.status} />
             <div className="flex-1">
-              <div className="flex items-center gap-2 text-zinc-800">
+              <div className="flex items-center gap-2 text-nyx-chalk">
                 <span className="font-semibold">{step.label}</span>
                 {step.durationMs != null ? (
-                  <span className="font-mono text-[10px] text-zinc-500">
+                  <span className="font-mono text-[10px] text-nyx-slate">
                     {step.durationMs}ms
                   </span>
                 ) : null}
               </div>
               {step.detail ? (
-                <div className="mt-0.5 break-all font-mono text-[11px] text-zinc-600">
+                <div className="mt-0.5 break-all font-mono text-[11px] text-nyx-fog">
                   {step.detail}
                 </div>
               ) : null}
@@ -187,10 +187,10 @@ export function ProverSmokeTestPanel() {
 
 function StatusBadge({ status }: { status: StepStatus }) {
   const cls: Record<StepStatus, string> = {
-    idle: "bg-zinc-300 text-zinc-700",
-    running: "bg-amber-200 text-amber-900",
-    success: "bg-emerald-200 text-emerald-900",
-    error: "bg-red-200 text-red-900",
+    idle: "bg-white/[0.08] text-nyx-fog ring-1 ring-white/[0.08]",
+    running: "bg-nyx-signal-amber/18 text-nyx-signal-amber ring-1 ring-nyx-signal-amber/35",
+    success: "bg-nyx-signal-green/18 text-nyx-signal-green ring-1 ring-nyx-signal-green/35",
+    error: "bg-nyx-signal-red/18 text-nyx-signal-red ring-1 ring-nyx-signal-red/35",
   };
   const label: Record<StepStatus, string> = {
     idle: "—",
