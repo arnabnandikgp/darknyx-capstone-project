@@ -7,7 +7,7 @@ import bs58 from "bs58";
 import { useDappContext } from "@/lib/dapp/dapp-context";
 import { formatAtoms, toAtoms } from "@/lib/dapp/decimals";
 import { instructionFromJson, type InstructionJson } from "@/lib/dapp/ix-json";
-import { readDappSession, type DappSessionV1 } from "@/lib/dapp/dapp-session";
+import { readDappSessionForOwner, type DappSessionV1 } from "@/lib/dapp/dapp-session";
 
 import { NYX_TRADE_WITHDRAW_KEY } from "@/lib/dapp/trade-withdraw-storage";
 
@@ -54,7 +54,7 @@ function txUrl(sig: string) {
 }
 
 export function DappTradeFlowPanel() {
-  const { forwarder, connection: l1 } = useDappContext();
+  const { forwarder, connection: l1, wallet } = useDappContext();
   const er = useMemo(() => new Connection(ER_RPC, "confirmed"), []);
 
   const [session, setSession] = useState<DappSessionV1 | null>(null);
@@ -68,6 +68,7 @@ export function DappTradeFlowPanel() {
   );
   const [depositNonce] = useState(() => (BigInt(Date.now()) + 333_333n).toString());
   const [tokenMeta, setTokenMeta] = useState<TokenMeta | null>(null);
+  const connectedOwner = wallet.publicKey?.toBase58() ?? null;
 
   const baseDecimals = tokenMeta?.baseDecimals ?? 6;
   const quoteDecimals = tokenMeta?.quoteDecimals ?? 6;
@@ -140,14 +141,14 @@ export function DappTradeFlowPanel() {
   }, []);
 
   const refresh = useCallback(() => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     setSession(s);
     if (s) {
       void fetchBalances(s.ownerPubkeyBase58);
     } else {
       setBalances(null);
     }
-  }, [fetchBalances]);
+  }, [connectedOwner, fetchBalances]);
 
   useEffect(() => {
     // SSR renders this component with a null session; hydration on the client
@@ -156,19 +157,21 @@ export function DappTradeFlowPanel() {
     // skipping the read would leave a logged-in user looking like a fresh one
     // until they touch the form.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSession(readDappSession());
-    const s = readDappSession();
+    setSession(readDappSessionForOwner(connectedOwner));
+    const s = readDappSessionForOwner(connectedOwner);
     if (s) {
       void fetchBalances(s.ownerPubkeyBase58);
+    } else {
+      setBalances(null);
     }
-  }, [fetchBalances]);
+  }, [connectedOwner, fetchBalances]);
 
   const appendReceipt = (lines: ReceiptLine[]) => {
     setReceipt((r) => [...r, ...lines]);
   };
 
   const runRegister = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s) throw new Error("Complete the identity step above first.");
     setBusy(true);
     setError(null);
@@ -208,7 +211,7 @@ export function DappTradeFlowPanel() {
   };
 
   const runInitSlot = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s) throw new Error("No session");
     setBusy(true);
     setError(null);
@@ -240,7 +243,7 @@ export function DappTradeFlowPanel() {
   };
 
   const runDeposit = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s) throw new Error("No session");
     const baseAtoms = baseAtomsForCurrentInput();
     const quoteAtoms = baseAtoms * quotePerBaseAtomic;
@@ -285,7 +288,7 @@ export function DappTradeFlowPanel() {
   };
 
   const runSubmitOrderEr = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s || slotIdx == null || !depositNote?.commitmentHex) {
       throw new Error("Complete slot + deposit steps first.");
     }
@@ -350,7 +353,7 @@ export function DappTradeFlowPanel() {
   };
 
   const runCounterMatch = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s || slotIdx == null) throw new Error("Missing slot");
     setBusy(true);
     setError(null);
@@ -416,7 +419,7 @@ export function DappTradeFlowPanel() {
   const nextAction = async () => {
     try {
       refresh();
-      if (!readDappSession()) return;
+      if (!readDappSessionForOwner(connectedOwner)) return;
       if (step === "idle") await runRegister();
       else if (step === "registered") await runInitSlot();
       else if (step === "slot_ready") await runDeposit();
@@ -428,7 +431,7 @@ export function DappTradeFlowPanel() {
     }
   };
 
-  const s0 = session ?? readDappSession();
+  const s0 = session ?? readDappSessionForOwner(connectedOwner);
   const label =
     step === "matched"
       ? "Done"

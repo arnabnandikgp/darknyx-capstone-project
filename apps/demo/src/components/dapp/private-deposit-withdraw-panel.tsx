@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useDappContext } from "@/lib/dapp/dapp-context";
 import { formatAtoms, toAtoms } from "@/lib/dapp/decimals";
 import { instructionFromJson, type InstructionJson } from "@/lib/dapp/ix-json";
-import { readDappSession, type DappSessionV1 } from "@/lib/dapp/dapp-session";
+import { readDappSessionForOwner, type DappSessionV1 } from "@/lib/dapp/dapp-session";
 
 type DepositTracking = {
   leafIndex: string;
@@ -50,7 +50,7 @@ function bytesToHex(b: Uint8Array): string {
 }
 
 export function PrivateDepositWithdrawPanel() {
-  const { forwarder, getProver } = useDappContext();
+  const { forwarder, getProver, wallet } = useDappContext();
   const [session, setSession] = useState<DappSessionV1 | null>(null);
   const [step, setStep] = useState<PanelStep>("idle");
   const [busy, setBusy] = useState(false);
@@ -61,6 +61,7 @@ export function PrivateDepositWithdrawPanel() {
   const [receipt, setReceipt] = useState<ReceiptLine[]>([]);
   const [proverMs, setProverMs] = useState<number | null>(null);
   const [balances, setBalances] = useState<BalancesResponse | null>(null);
+  const connectedOwner = wallet.publicKey?.toBase58() ?? null;
 
   const fetchBalances = async (ownerPubkeyBase58: string) => {
     try {
@@ -81,17 +82,23 @@ export function PrivateDepositWithdrawPanel() {
     // then reads sessionStorage and re-renders. See the matching note in
     // dapp-trade-flow-panel.tsx — same hydration constraint applies here.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSession(readDappSession());
-    const s = readDappSession();
+    setSession(readDappSessionForOwner(connectedOwner));
+    const s = readDappSessionForOwner(connectedOwner);
     if (s) {
       void fetchBalances(s.ownerPubkeyBase58);
+    } else {
+      setBalances(null);
     }
-  }, []);
+  }, [connectedOwner]);
 
   const refresh = () => {
-    setSession(readDappSession());
-    const s = readDappSession();
-    if (s) void fetchBalances(s.ownerPubkeyBase58);
+    const s = readDappSessionForOwner(connectedOwner);
+    setSession(s);
+    if (s) {
+      void fetchBalances(s.ownerPubkeyBase58);
+    } else {
+      setBalances(null);
+    }
   };
 
   const balanceForSide = (s: "base" | "quote"): bigint | null => {
@@ -112,7 +119,7 @@ export function PrivateDepositWithdrawPanel() {
   const append = (lines: ReceiptLine[]) => setReceipt((r) => [...r, ...lines]);
 
   const runDeposit = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s) throw new Error("Complete the identity step above first.");
     const dec = decimalsForSide(side);
     if (dec == null) {
@@ -167,7 +174,7 @@ export function PrivateDepositWithdrawPanel() {
   };
 
   const runWithdraw = async () => {
-    const s = readDappSession();
+    const s = readDappSessionForOwner(connectedOwner);
     if (!s) throw new Error("Session expired — re-derive your identity above.");
     if (!tracking) throw new Error("Run the deposit step first.");
     setBusy(true);
@@ -266,7 +273,7 @@ export function PrivateDepositWithdrawPanel() {
   const onClick = async () => {
     try {
       refresh();
-      if (!readDappSession()) return;
+      if (!readDappSessionForOwner(connectedOwner)) return;
       if (step === "idle") await runDeposit();
       else if (step === "deposited") await runWithdraw();
     } catch (e) {
@@ -291,7 +298,7 @@ export function PrivateDepositWithdrawPanel() {
     setProverMs(null);
   };
 
-  const s0 = session ?? readDappSession();
+  const s0 = session ?? readDappSessionForOwner(connectedOwner);
   const label =
     step === "idle"
       ? "Private deposit"

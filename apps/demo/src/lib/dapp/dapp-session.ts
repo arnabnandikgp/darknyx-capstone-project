@@ -23,3 +23,10 @@ export function readDappSession(): DappSessionV1 | null {
     return null;
   }
 }
+
+export function readDappSessionForOwner(ownerPubkeyBase58: string | null | undefined): DappSessionV1 | null {
+  if (!ownerPubkeyBase58) return null;
+  const session = readDappSession();
+  if (!session) return null;
+  return session.ownerPubkeyBase58 === ownerPubkeyBase58 ? session : null;
+}
