@@ -90,6 +90,7 @@ To run the live devnet ER trade flow, see
 | Document                                                       | Read it for…                                                |
 |----------------------------------------------------------------|-------------------------------------------------------------|
 | **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**             | Deep dive — every component, PDA, flow, threat model        |
+| **[`DeepWiki`](https://deepwiki.com/skysail-labs/darknyx)**    | Indexed, code-linked walkthrough of the repo                |
 | **[`scripts/dev-commands.md`](scripts/dev-commands.md)**       | Master command cheat-sheet — build, test, deploy, troubleshoot |
 | `order_privacy_fix.md`                                         | Design note — why `submit_order` moved into the ER          |
 | `partial_fill_and_fee_notes.md`                                | Design note — partial-fill collateral rotation + fee notes   |
@@ -98,7 +99,8 @@ To run the live devnet ER trade flow, see
 
 The `*.md` design notes at the repo root are historical and informative;
 the **authoritative** description of the live system is in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and in the source code under
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the indexed
+[DeepWiki](https://deepwiki.com/skysail-labs/darknyx), and in the source code under
 `programs/` and `packages/sdk/src/`.
 
 ---

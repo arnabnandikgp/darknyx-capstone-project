@@ -2154,6 +2154,7 @@ name = "matching_engine"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "anchor-spl",
  "borsh 1.6.1",
  "bytemuck",
  "darkpool-crypto",
