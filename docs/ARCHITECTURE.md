@@ -121,9 +121,9 @@ nyx-monorepo/
 │   └── darkpool-crypto/                       # Host-side cryptography (ZK-input prep)
 │       └── src/
 │           ├── poseidon.rs                    # Light-protocol Poseidon2 wrapper
-│           ├── note.rs                        # Note commitment: Poseidon(mint,amt,owner,nonce,r)
-│           ├── nullifier.rs                   # Nullifier: Poseidon(spending_key, leaf_idx)
-│           ├── keys.rs                        # Spending / viewing key derivation (HKDF-SHA3)
+│           ├── note.rs                        # Note commitment: Poseidon6(mint_lo,mint_hi,amt,owner,nonce,r)
+│           ├── nullifier.rs                   # Nullifier: Poseidon2(spending_key, note_commitment)
+│           ├── keys.rs                        # Spending / viewing key derivation (HKDF-SHA256 + KMAC256)
 │           ├── viewing_keys.rs                # Owner-commitment + r-derivation chain
 │           ├── user_commitment.rs             # User commitment Poseidon helper
 │           └── field.rs                       # BN254 Fr range + LE/BE encoding helpers
@@ -340,42 +340,56 @@ shells out to a CLI helper compiled from
 byte-for-byte. The crate is intentionally kept off the SBF target (it
 uses heap, RNG, etc.) — only the on-chain verifier consumes its outputs.
 
-Key derivation chain (HKDF-SHA3 over the wallet seed):
+Key derivation chain (HKDF-SHA256 for Ed25519 / spending key, KMAC256 for
+viewing key and per-note blinding — see `crates/darkpool-crypto/src/keys.rs`):
 
 ```
-    seed
-     ├── spending_key (s)
-     ├── viewing_key  (v)
-     └── owner_blinding chain
-            ├── r0  ──► owner_commitment = Poseidon(s, v, r0)
-            ├── r1  ──► used in note_commitment derivations
-            └── r2  ──► used in nullifier derivations
+    master_seed (64 B)
+     ├── HKDF-SHA256("darkpool_spend_key_v1", 512b → mod r)   ──► spending_key  (s)
+     ├── KMAC256   ("darkpool_viewing_key_v1", 512b → mod r)   ──► viewing_key   (v)
+     ├── HKDF-SHA256("darkpool_root_key_v1", 32 B)            ──► root_key (Ed25519)
+     ├── HKDF-SHA256("darkpool_trading_key_v1" ‖ offset, 32B) ──► trading_key(offset)
+     └── KMAC256   ("note_blinding_v1" ‖ counter, 512b → mod r) ──► blinding_r(i)
+
+    user-commitment chain (independent r0, r1, r2 blinders):
+        leafPair    = Poseidon2( Poseidon3(root_lo, root_hi, r0),
+                                 Poseidon2(s, r1) )
+        user_commit = Poseidon2( leafPair, Poseidon2(v, r2) )
+
+    owner-commitment chain (separate r_owner blinder, reused across all notes):
+        owner_commitment = Poseidon2(s, r_owner)
 ```
 
-Note commitment: `note = Poseidon(token_mint, amount, owner_commitment, nonce, r)`.
-Nullifier: `nullifier = Poseidon(spending_key, leaf_index)` — leaks
-*nothing* about which note was spent unless the spending key is known.
+Note commitment: `note = Poseidon6(mint_lo, mint_hi, amount, owner_commitment, nonce, blinding_r)`.
+The Solana mint pubkey is split into two 128-bit halves because a single
+BN254 Fr element cannot hold all 256 bits of a pubkey.
+
+Nullifier: `nullifier = Poseidon2(spending_key, note_commitment)`. Bound to
+the commitment, not the leaf index — so two notes with identical contents
+but different positions still have different commitments (because
+`blinding_r` depends on the leaf-time counter) and therefore different
+nullifiers. Leaks nothing about which note was spent unless the spending
+key is known.
 
 ### `circuits/` — zero-knowledge proofs
 
 Two Groth16 circuits, both pre-compiled to `.wasm` (witness gen) +
 `.zkey` (proving key) by `scripts/build-circuits.sh`:
 
-- **VALID_WALLET_CREATE**: proves "I know `(s, v, r0, r1, r2)` such that
-  `user_commitment == Poseidon(Poseidon(s, v, r0), r1, r2)`." Public
-  input: `(user_commitment_lo, user_commitment_hi, root_key_lo, root_key_hi)`
-  (BN254 field elements stored as `[lo, hi]` Fr-pairs because
-  `user_commitment` is an arbitrary 32-byte value, not necessarily
-  < the BN254 modulus).
+- **VALID_WALLET_CREATE**: proves "I know `(root_pubkey_lo, root_pubkey_hi,
+  s, v, r0, r1, r2)` such that the user-commitment chain (above) yields
+  `user_commitment`." **One** public input: `user_commitment` (a single
+  32-byte BN254 Fr element — Poseidon output is always in-field).
 
-- **VALID_SPEND**: proves "I know `(s, owner_commitment, nonce, r,
-  amount, mint, leaf_index, merkle_path)` such that the leaf
-  `Poseidon(mint, amount, owner_commitment, nonce, r)` is at
-  `leaf_index` in the tree with root `merkle_root`, the spending key
-  derives `owner_commitment`, and the declared
-  `nullifier == Poseidon(s, leaf_index)`." Public input:
-  `(merkle_root_lo, merkle_root_hi, mint_lo, mint_hi, amount,
-  nullifier_lo, nullifier_hi)`.
+- **VALID_SPEND**: proves "I know `(s, r_owner, nonce, blinding_r,
+  merkle_path[20], merkle_indices[20])` such that
+  `owner_commitment = Poseidon2(s, r_owner)`,
+  `note = Poseidon6(mint_lo, mint_hi, amount, owner_commitment, nonce, blinding_r)`,
+  `note` is in the Merkle tree at `merkle_root`, and
+  `nullifier == Poseidon2(s, note)`." **Five** public inputs in this
+  order: `(merkle_root, nullifier, mint_lo, mint_hi, amount)`. Only the
+  mint is split as `[lo, hi]` because a Solana pubkey is 256 bits;
+  `merkle_root` and `nullifier` are Poseidon outputs (single Fr each).
 
 The verifier keys are baked into the on-chain `vault` program at
 `programs/vault/src/zk/vk_*.rs` (regenerated from the snarkjs JSON via
