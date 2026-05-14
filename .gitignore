@@ -50,10 +50,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-#misc
-darkpool/
-darkpool_protocol_spec_v3_changed.md
-
 #agents
 .agents/
 .factory/
