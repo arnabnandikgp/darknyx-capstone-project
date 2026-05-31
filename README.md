@@ -1,7 +1,7 @@
 # Nyx Darkpool
 
 A **dark pool on Solana** for SPL tokens. Order intent stays inside a
-MagicBlock Ephemeral Rollup (ER), settlement is atomic on L1 with a
+MagicBlock Private Ephemeral Rollup (PER), settlement is atomic on L1 with a
 TEE-signed payload, and balances are encrypted UTXO notes (Poseidon
 commitments in an incremental Merkle tree). Withdrawals require a
 Groth16 ZK proof.
@@ -37,7 +37,7 @@ MagicBlock infra (used by the SDK):
 | Delegation program               | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh`  |
 | Magic program                    | `Magic11111111111111111111111111111111111111`  |
 | Magic context                    | `MagicContext1111111111111111111111111111111`  |
-| ER RPC (devnet)                  | `https://devnet.magicblock.app`                |
+| PER RPC (devnet)                  | `https://devnet.magicblock.app`                |
 
 Verify on-chain:
 
