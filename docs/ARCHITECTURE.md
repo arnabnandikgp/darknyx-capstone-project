@@ -7,15 +7,27 @@ addresses + 3-step quickstart) see the top-level [`README.md`](../README.md).
 
 ## Table of contents
 
-1. [System overview](#system-overview)
-2. [Project layout](#project-layout)
-3. [Privacy architecture](#privacy-architecture)
-4. [Component-by-component walkthrough](#component-by-component-walkthrough)
-5. [End-to-end transaction flow](#end-to-end-transaction-flow)
-6. [Account / PDA reference](#account--pda-reference)
-7. [Cryptographic primitives](#cryptographic-primitives)
-8. [Security model + threat assumptions](#security-model--threat-assumptions)
-9. [What is NOT yet shipped](#what-is-not-yet-shipped)
+- [Nyx Darkpool — Architecture](#nyx-darkpool--architecture)
+  - [Table of contents](#table-of-contents)
+  - [System overview](#system-overview)
+  - [Project layout](#project-layout)
+  - [Privacy architecture](#privacy-architecture)
+    - [What is hidden, what is public](#what-is-hidden-what-is-public)
+    - [Why an Ephemeral Rollup?](#why-an-ephemeral-rollup)
+    - [How `submit_order` becomes invisible](#how-submit_order-becomes-invisible)
+  - [Component-by-component walkthrough](#component-by-component-walkthrough)
+    - [`programs/vault` — custody + Merkle tree + ZK + settlement](#programsvault--custody--merkle-tree--zk--settlement)
+    - [`programs/matching_engine` — CLOB + ER glue](#programsmatching_engine--clob--er-glue)
+    - [`crates/darkpool-crypto` — host-side crypto](#cratesdarkpool-crypto--host-side-crypto)
+    - [`circuits/` — zero-knowledge proofs](#circuits--zero-knowledge-proofs)
+    - [`packages/sdk` — TypeScript client](#packagessdk--typescript-client)
+  - [End-to-end transaction flow](#end-to-end-transaction-flow)
+  - [Account / PDA reference](#account--pda-reference)
+    - [Vault PDAs](#vault-pdas)
+    - [Matching engine PDAs](#matching-engine-pdas)
+  - [Cryptographic primitives](#cryptographic-primitives)
+  - [Security model + threat assumptions](#security-model--threat-assumptions)
+  - [What is NOT yet shipped](#what-is-not-yet-shipped)
 
 ---
 
@@ -27,14 +39,14 @@ addresses + 3-step quickstart) see the top-level [`README.md`](../README.md).
      │  (browser)    │   note added to     │  (Solana L1)        │
      └──────┬────────┘   Merkle tree       └─────────────────────┘
             │
-            │ submit_order (ER, JWT-gated PER RPC)
+            │ submit_order (PER, JWT-gated PER RPC)
             │ ★ side / price / amount / note_commitment NEVER touch L1
             ▼
-   ┌────────────────────────┐  run_batch (ER)
+   ┌────────────────────────┐  run_batch (PER)
    │  PendingOrder PDA      ├──────────────────► uniform-clearing-price
    │  (delegated to ER)     │                    match in the rollup
    └─────────┬──────────────┘
-             │ commit + undelegate (ER → L1)
+             │ commit + undelegate (PER → L1)
              ▼
        BatchResults snapshot lands back on L1
              │
@@ -56,7 +68,7 @@ Three trust boundaries, three layers:
 | Layer            | Tech                                | Purpose                                      |
 |------------------|-------------------------------------|----------------------------------------------|
 | **L1 (Solana)**  | Anchor 0.32 programs (vault + ME)   | Custody, Merkle tree, ZK verifier, settlement |
-| **ER (rollup)**  | MagicBlock Ephemeral Rollup         | Hidden order intent + matching                |
+| **PER (rollup)**  | MagicBlock Ephemeral Rollup         | Hidden order intent + matching                |
 | **Client (TS)**  | `@nyx/sdk`, snarkjs, ZK circuits    | Key derivation, proof generation, ix builders |
 
 ---
@@ -108,11 +120,11 @@ nyx-monorepo/
 │       │   │   ├── delegate_dark_clob.rs      # L1: hand DarkCLOB PDA to ER
 │       │   │   ├── delegate_matching_config.rs
 │       │   │   ├── delegate_batch_results.rs
-│       │   │   ├── submit_order.rs            # ★ ER-only single-account write
-│       │   │   ├── cancel_order.rs            # ★ ER-only owner-authenticated cancel
-│       │   │   ├── run_batch.rs               # ★ ER: matches PendingOrder remaining_accounts
-│       │   │   ├── commit_market_state.rs     # ER: ScheduleCommit (keeps delegation)
-│       │   │   ├── undelegate_market.rs       # ER: ScheduleCommitAndUndelegate
+│       │   │   ├── submit_order.rs            # ★ PER-only single-account write
+│       │   │   ├── cancel_order.rs            # ★ PER-only owner-authenticated cancel
+│       │   │   ├── run_batch.rs               # ★ PER: matches PendingOrder remaining_accounts
+│       │   │   ├── commit_market_state.rs     # PER: ScheduleCommit (keeps delegation)
+│       │   │   ├── undelegate_market.rs       # PER: ScheduleCommitAndUndelegate
 │       │   │   └── configure_access.rs        # PER access-control list
 │       │   └── errors.rs
 │       └── tests/                              # 23 litesvm integration tests
@@ -536,28 +548,15 @@ intent on L1"). Remaining backlog (mirrored in
 1. **Real TDX/SEV TEE + remote attestation** (Phase 6). The TEE is
    currently a local Ed25519 keypair acting as the signing authority.
    Production deploys must pin the key inside an attested enclave.
-2. **Browser prover** (`WebProverSuite`) replacing the snarkjs
-   shell-out. Today the SDK shells out to
-   `node_modules/snarkjs/build/cli.cjs`, which is fine on a server but
-   unwieldy in a wallet extension.
-3. **Partial-fill + re-lock scenario** exercised end-to-end on devnet.
+2. **Partial-fill + re-lock scenario** exercised end-to-end on devnet.
    The on-chain code paths exist (and 2 of the 12 `run_batch` tests
    cover it in litesvm) but no devnet test currently drives the
    collateral rotation across two batches.
-4. **`undelegate_pending_order`** — let users release a slot back to L1
-   to refund rent. Today slots stay delegated forever.
-5. **Emergency `force_undelegate_on_l1`** admin ix (pressure valve if
+3. **Emergency `force_undelegate_on_l1`** admin ix (pressure valve if
    the ER is down).
-6. **Real protocol-owner keypair** for fee withdrawal. Fee notes
-   accumulate but can't be spent until a real protocol-owner key is
-   wired in.
-7. **Continuous ER ↔ L1 commit scheduler** inside the TEE loop. Today
+4. **Continuous ER ↔ L1 commit scheduler** inside the TEE loop. Today
    the test commits manually via `undelegate_market`. Production wants
    `commit_market_state` (keeps delegation) every N slots so settlement
    can pick up matches without a full undelegate cycle.
-8. **Oracle refresh inside long-running ER sessions** — Pyth Pull-v2
+5. **Oracle refresh inside long-running ER sessions** — Pyth Pull-v2
    accounts are clone-at-open today.
-9. **PER JWT session manager** wired into the ER trade-flow test —
-   the on-chain privacy property is independent of this, but the
-   network-side anonymity-set requires JWT-gated ingress to be
-   effective.
