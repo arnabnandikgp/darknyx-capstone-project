@@ -103,8 +103,4 @@ the **authoritative** description of the live system is in
 [DeepWiki](https://deepwiki.com/skysail-labs/darknyx), and in the source code under
 `programs/` and `packages/sdk/src/`.
 
----
 
-## License
-
-Apache-2.0.
